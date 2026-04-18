@@ -18,7 +18,7 @@ if [[ ! -f "$VIEWER" ]]; then
 fi
 
 for arg in "$@"; do
-  if [[ "$arg" == "--export" || "$arg" == --export=* ]]; then
+  if [[ "$arg" == "--export" || "$arg" == --export=* || "$arg" == "--active-shares" ]]; then
     exec "$PYTHON_BIN" "$VIEWER" "$@"
   fi
 done
@@ -36,7 +36,7 @@ if [[ -z "${selection// }" ]]; then
   exit 0
 fi
 
-if [[ "$selection" != cd\ * && "$selection" != codex\ resume\ * ]]; then
+if [[ ! "$selection" =~ ^(cd\ .+\ \&\&\ )?codex\ (resume|fork)(\ .+)?$ ]]; then
   echo "Viewer did not return an executable resume command." >&2
   echo "Output was:" >&2
   printf '%s\n' "$selection" >&2

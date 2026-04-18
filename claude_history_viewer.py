@@ -99,6 +99,11 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Output path for --export. Defaults to ./claude-session-<id>.<ext>.",
     )
+    parser.add_argument(
+        "--active-shares",
+        action="store_true",
+        help="Print all active web shares and wait for Enter before exiting.",
+    )
     return parser.parse_args()
 
 
@@ -352,6 +357,51 @@ def draw_lines(win: curses.window, start_y: int, start_x: int, width: int, lines
         y += 1
 
 
+def wrap_detail_lines(items: list[tuple[str, str]], width: int) -> list[str]:
+    lines: list[str] = []
+    key_width = min(14, max(8, width // 4))
+    value_width = max(12, width - key_width - 2)
+    for key, value in items:
+        wrapped = textwrap.wrap(value or "", width=value_width) or [""]
+        lines.append(f"{key:<{key_width}} {wrapped[0]}")
+        for extra in wrapped[1:]:
+            lines.append(f"{'':<{key_width}} {extra}")
+    return lines
+
+
+def format_active_shares_report(tool: str) -> str:
+    shares = list_active_shares(tool)
+    lines = [f"{tool.capitalize()} Active Web Shares", ""]
+    if not shares:
+        lines.append("No active web shares.")
+        return "\n".join(lines)
+    for index, share in enumerate(shares, start=1):
+        lines.extend(
+            [
+                f"{index}. Session: {share.get('session_id', 'unknown')}",
+                f"   Mode: {share.get('mode', 'unknown')}",
+                f"   Started: {share.get('started_at', 'unknown')}",
+                f"   Bundle: {share.get('bundle_dir', 'unknown')}",
+                f"   Local URL: {share.get('local_url', 'unknown')}",
+                f"   Public URL: {share.get('public_url') or 'not exposed'}",
+                f"   Server PID: {share.get('server_pid', 'unknown')}",
+                f"   Tunnel PID: {share.get('tunnel_pid', 'none')}",
+                f"   Tunnel alive: {'yes' if share.get('tunnel_alive') else 'no'}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
+def show_active_shares_report(tool: str) -> int:
+    report = format_active_shares_report(tool)
+    print(report)
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        print("")
+        input("Press Enter to exit...")
+    return 0
+
+
 def format_share_age(started_at: str) -> str:
     if not started_at:
         return "unknown"
@@ -388,6 +438,11 @@ def find_session_shares(shares: list[dict], session_id: str) -> list[dict]:
     return [share for share in shares if str(share.get("session_id") or "") == session_id]
 
 
+def summarize_share(share: dict) -> str:
+    target = str(share.get("public_url") or share.get("local_url") or "unknown")
+    return f"{share.get('mode', 'serve')} {target}"
+
+
 def draw_share_view(
     stdscr: curses.window,
     shares: list[dict],
@@ -408,12 +463,12 @@ def draw_share_view(
         share = shares[idx]
         row = top_y + idx - scroll
         marker = ">" if idx == selected else " "
-        public_marker = "public" if share.get("public_url") else "local"
+        target = str(share.get("public_url") or share.get("local_url") or "unknown")
         line = (
             f"{marker} {format_share_age(str(share.get('started_at') or '')):>8}  "
             f"{clip(str(share.get('mode') or 'serve'), 6):6}  "
-            f"{clip(public_marker, 6):6}  "
-            f"{clip(str(share.get('session_id') or ''), max(8, list_width - 28))}"
+            f"{clip(str(share.get('session_id') or ''), 12):12}  "
+            f"{clip(target, max(8, list_width - 32))}"
         )
         attr = curses.A_REVERSE if idx == selected else 0
         stdscr.addnstr(row, 0, clip(line, list_width - 1), list_width - 1, attr)
@@ -421,22 +476,33 @@ def draw_share_view(
     share = shares[selected]
     detail_width = max(10, width - detail_x - 1)
     tunnel_state = "up" if share.get("tunnel_alive") else "down"
-    details = [
-        f"Session ID: {share.get('session_id', 'unknown')}",
-        f"Mode: {share.get('mode', 'unknown')}",
-        f"Started: {share.get('started_at', 'unknown')} ({format_share_age(str(share.get('started_at') or ''))})",
-        f"Bundle: {share.get('bundle_dir', 'unknown')}",
-        f"Local URL: {share.get('local_url', 'unknown')}",
-        f"Public URL: {share.get('public_url') or 'not exposed'}",
-        f"Server PID: {share.get('server_pid', 'unknown')}",
-        f"Tunnel PID: {share.get('tunnel_pid', 'none')} ({tunnel_state})",
-        "",
-        "Notes:",
-        "These rows are discovered from live share state files in /tmp.",
-        "Keys: x stop selected share, r refresh.",
-        "Closed or crashed sessions are removed automatically on refresh.",
-    ]
-    draw_lines(stdscr, top_y, detail_x, detail_width, [clip(line, detail_width) for line in details])
+    details = wrap_detail_lines(
+        [
+            ("Session ID", str(share.get("session_id", "unknown"))),
+            ("Mode", str(share.get("mode", "unknown"))),
+            (
+                "Started",
+                f"{share.get('started_at', 'unknown')} ({format_share_age(str(share.get('started_at') or ''))})",
+            ),
+            ("Bundle", str(share.get("bundle_dir", "unknown"))),
+            ("Local URL", str(share.get("local_url", "unknown"))),
+            ("Public URL", str(share.get("public_url") or "not exposed")),
+            ("Server PID", str(share.get("server_pid", "unknown"))),
+            ("Tunnel PID", f"{share.get('tunnel_pid', 'none')} ({tunnel_state})"),
+            ("State Path", str(share.get("state_path", "unknown"))),
+        ],
+        detail_width,
+    )
+    details.extend(
+        [
+            "",
+            "Notes:",
+            "These rows are discovered from live share state files in /tmp.",
+            "Keys: x stop selected share, r refresh.",
+            "Closed or crashed sessions are removed automatically on refresh.",
+        ]
+    )
+    draw_lines(stdscr, top_y, detail_x, detail_width, details)
 
 
 def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query: str) -> str | None:
@@ -480,7 +546,17 @@ def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query
         help_text = "Tab switch tab  Up/Down move  Enter resumes  / filter  c command  e export  w share start/stop  J/M/H quick export  q quit"
         stdscr.addnstr(1, 0, clip(help_text, width - 1), width - 1)
         render_tabs(stdscr, width, active_tab)
-        info_text = f"Filter: {query or '(none)'}" if active_tab == "sessions" else f"Active shares: {len(shares)}"
+        if active_tab == "sessions":
+            if filtered:
+                selected_shares = find_session_shares(shares, filtered[selected].session_id)
+                share_text = summarize_share(selected_shares[0]) if selected_shares else "none"
+            else:
+                share_text = "none"
+            info_text = f"Filter: {query or '(none)'}  Share: {share_text}"
+        else:
+            selected_share = shares[share_selected] if shares else None
+            share_text = summarize_share(selected_share) if selected_share else "none"
+            info_text = f"Active shares: {len(shares)}  Selected: {share_text}"
         stdscr.addnstr(3, 0, clip(info_text, width - 1), width - 1, curses.A_DIM)
         if status:
             stdscr.addnstr(4, 0, clip(status, width - 1), width - 1, curses.A_DIM)
@@ -529,8 +605,7 @@ def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query
             if active_session_shares:
                 details.append(f"Web share: {len(active_session_shares)} active")
                 for share in active_session_shares[:2]:
-                    target = share.get("public_url") or share.get("local_url") or "unknown"
-                    details.append(f"- {share.get('mode', 'serve')}: {target}")
+                    details.append(f"- {summarize_share(share)}")
                 if len(active_session_shares) > 2:
                     details.append(f"- +{len(active_session_shares) - 2} more")
             else:
@@ -875,6 +950,9 @@ def interactive_web_bundle(stdscr: curses.window, session: SessionSummary) -> st
 def main() -> int:
     args = parse_args()
     claude_dir = Path(os.path.expanduser(args.claude_dir))
+
+    if args.active_shares:
+        return show_active_shares_report("claude")
 
     try:
         sessions = load_sessions(claude_dir, limit=args.limit)

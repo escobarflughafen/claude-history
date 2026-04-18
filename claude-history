@@ -17,7 +17,7 @@ if [[ ! -f "$VIEWER" ]]; then
 fi
 
 for arg in "$@"; do
-  if [[ "$arg" == "--export" || "$arg" == --export=* ]]; then
+  if [[ "$arg" == "--export" || "$arg" == --export=* || "$arg" == "--active-shares" ]]; then
     exec "$PYTHON_BIN" "$VIEWER" "$@"
   fi
 done
