@@ -14,13 +14,20 @@ import curses
 import datetime as dt
 import json
 import os
+import tempfile
 import sys
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from export_utils import format_export_ts, now_iso, write_export
+from export_utils import (
+    format_export_ts,
+    now_iso,
+    serve_bundle,
+    write_bundle,
+    write_export,
+)
 
 
 DEFAULT_CLAUDE_DIR = Path.home() / ".claude"
@@ -368,7 +375,7 @@ def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query
 
         stdscr.erase()
         stdscr.addnstr(0, 0, clip("Claude History Viewer", width - 1), width - 1, curses.A_BOLD)
-        help_text = "Up/Down move  Enter resumes  / filter  c command  e export  J/M/H quick export  q quit"
+        help_text = "Up/Down move  Enter resumes  / filter  c command  e export  w web bundle  J/M/H quick export  q quit"
         stdscr.addnstr(1, 0, clip(help_text, width - 1), width - 1)
         stdscr.addnstr(2, 0, clip(f"Filter: {query or '(none)'}", width - 1), width - 1, curses.A_DIM)
         if status:
@@ -434,6 +441,8 @@ def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query
             return f"claude --resume {session.session_id}"
         elif key == ord("e"):
             status = interactive_export(stdscr, session)
+        elif key == ord("w"):
+            status = interactive_web_bundle(stdscr, session)
         elif key in (ord("J"), ord("M"), ord("H")):
             export_format = {ord("J"): "json", ord("M"): "md", ord("H"): "html"}[key]
             try:
@@ -495,6 +504,29 @@ def interactive_export(stdscr: curses.window, session: SessionSummary) -> str:
     except OSError as exc:
         return f"Export failed: {exc}"
     return f"Exported {format_value} to {path}"
+
+
+def prompt_choice(stdscr: curses.window, label: str, allowed: set[str]) -> str:
+    value = prompt_input(stdscr, label)
+    if not value:
+        return ""
+    value = value.lower()
+    return value if value in allowed else ""
+
+
+def pause_bundle_session(stdscr: curses.window, title: str, lines: list[str]) -> None:
+    curses.def_prog_mode()
+    curses.endwin()
+    try:
+        print(title)
+        print("")
+        for line in lines:
+            print(line)
+        print("")
+        input("Press Enter to stop the viewer session and return...")
+    finally:
+        curses.reset_prog_mode()
+        stdscr.refresh()
 
 
 def build_claude_export(session: SessionSummary) -> dict:
@@ -562,7 +594,7 @@ def build_claude_export(session: SessionSummary) -> dict:
                 }
             )
 
-    return {
+    bundle = {
         "schema_version": 1,
         "tool": "claude",
         "exported_at": now_iso(),
@@ -583,10 +615,114 @@ def build_claude_export(session: SessionSummary) -> dict:
         "messages": messages,
         "raw_entries": raw_entries,
     }
+    bundle["analytics"] = build_claude_analytics(bundle)
+    return bundle
+
+
+def build_claude_analytics(bundle: dict) -> dict:
+    role_counts: dict[str, int] = {}
+    tool_counts: dict[str, int] = {}
+    commands: list[dict[str, object]] = []
+    file_events: list[dict[str, object]] = []
+
+    for message in bundle.get("messages", []):
+        role = str(message.get("role") or "meta")
+        role_counts[role] = role_counts.get(role, 0) + 1
+
+    for entry in bundle.get("raw_entries", []):
+        entry_type = entry.get("type")
+        if entry_type == "assistant":
+            for item in entry.get("message", {}).get("content", []):
+                if isinstance(item, dict) and item.get("type") == "tool_use":
+                    name = str(item.get("name") or "unknown")
+                    tool_counts[name] = tool_counts.get(name, 0) + 1
+                    payload = item.get("input") or {}
+                    timestamp = format_export_ts(parse_timestamp_ms(entry.get("timestamp")))
+                    if isinstance(payload, dict):
+                        file_path = payload.get("file_path")
+                        if isinstance(file_path, str):
+                            file_events.append(
+                                {"timestamp": timestamp, "kind": name.lower(), "path": file_path}
+                            )
+                        command = payload.get("command")
+                        if isinstance(command, str):
+                            commands.append(
+                                {
+                                    "timestamp": timestamp,
+                                    "command": command,
+                                    "exit_code": "",
+                                    "tool": name,
+                                }
+                            )
+        elif entry_type == "user":
+            result = entry.get("toolUseResult")
+            timestamp = format_export_ts(parse_timestamp_ms(entry.get("timestamp")))
+            if isinstance(result, dict):
+                file_path = result.get("filePath")
+                if isinstance(file_path, str):
+                    file_events.append({"timestamp": timestamp, "kind": "tool_result", "path": file_path})
+                stdout = result.get("stdout")
+                stderr = result.get("stderr")
+                if isinstance(stdout, str) or isinstance(stderr, str):
+                    if commands:
+                        last = commands[-1]
+                        if last.get("exit_code") == "":
+                            last["exit_code"] = 0 if not stderr else 1
+
+    return {
+        "role_counts": role_counts,
+        "tool_counts": tool_counts,
+        "commands": commands,
+        "file_events": file_events,
+    }
 
 
 def export_session(session: SessionSummary, export_format: str, output: str = "") -> Path:
     return write_export(build_claude_export(session), export_format, output)
+
+
+def write_web_bundle(session: SessionSummary, output_dir: str = "", temp: bool = False) -> Path:
+    return write_bundle(build_claude_export(session), output_dir=output_dir, temp=temp)
+
+
+def interactive_web_bundle(stdscr: curses.window, session: SessionSummary) -> str:
+    mode = prompt_choice(
+        stdscr,
+        "Web mode [bundle|serve|tunnel] (default: tunnel)",
+        {"bundle", "serve", "tunnel"},
+    ) or "tunnel"
+
+    if mode == "bundle":
+        default_dir = f"claude-session-{session.session_id}-bundle"
+        output_dir = prompt_input(stdscr, f"Bundle path [{default_dir}]") or default_dir
+        try:
+            path = write_web_bundle(session, output_dir=output_dir)
+        except OSError as exc:
+            return f"Bundle export failed: {exc}"
+        return f"Bundle written to {path}"
+
+    output_hint = prompt_input(stdscr, "Bundle path [temp]")
+    keep_raw = prompt_input(stdscr, "Keep bundle after session ends? [y/N]")
+    keep_bundle = keep_raw.lower() in {"y", "yes"}
+    try:
+        path = write_web_bundle(session, output_dir=output_hint, temp=not bool(output_hint))
+        served = serve_bundle(path, with_tunnel=(mode == "tunnel"), keep_bundle=keep_bundle)
+    except Exception as exc:
+        return f"Bundle serve failed: {exc}"
+
+    lines = [
+        f"Bundle directory: {served.bundle_dir}",
+        f"Local URL: {served.local_url}",
+    ]
+    if served.public_url:
+        lines.append(f"Tunnel URL: {served.public_url}")
+    lines.append("Only this bundle directory is being served.")
+    lines.append("When you leave this screen, the local server and tunnel will stop.")
+    try:
+        pause_bundle_session(stdscr, "Web bundle session is live.", lines)
+    finally:
+        served.close()
+    return f"Stopped web bundle session for {session.session_id}"
 
 
 def main() -> int:
