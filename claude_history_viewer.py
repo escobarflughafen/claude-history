@@ -23,8 +23,10 @@ from typing import Iterable
 
 from export_utils import (
     format_export_ts,
+    list_active_shares,
     now_iso,
     serve_bundle,
+    stop_active_share,
     write_bundle,
     write_export,
 )
@@ -350,114 +352,280 @@ def draw_lines(win: curses.window, start_y: int, start_x: int, width: int, lines
         y += 1
 
 
+def format_share_age(started_at: str) -> str:
+    if not started_at:
+        return "unknown"
+    try:
+        started = dt.datetime.fromisoformat(started_at)
+    except ValueError:
+        return started_at
+    delta = dt.datetime.now(started.tzinfo or dt.timezone.utc) - started
+    seconds = max(0, int(delta.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def render_tabs(stdscr: curses.window, width: int, active_tab: str) -> None:
+    tabs = [
+        ("sessions", "Sessions"),
+        ("shares", "Active Shares"),
+    ]
+    x = 0
+    for key, label in tabs:
+        text = f"[{label}]" if key == active_tab else f" {label} "
+        attr = curses.A_BOLD if key == active_tab else curses.A_DIM
+        if x < width - 1:
+            stdscr.addnstr(2, x, clip(text, width - x - 1), width - x - 1, attr)
+        x += len(text) + 1
+
+
+def find_session_shares(shares: list[dict], session_id: str) -> list[dict]:
+    return [share for share in shares if str(share.get("session_id") or "") == session_id]
+
+
+def draw_share_view(
+    stdscr: curses.window,
+    shares: list[dict],
+    selected: int,
+    scroll: int,
+    top_y: int,
+    list_width: int,
+    detail_x: int,
+    width: int,
+    visible_rows: int,
+) -> None:
+    if not shares:
+        stdscr.addnstr(top_y, 0, clip("No active serve/tunnel sessions detected.", width - 1), width - 1)
+        stdscr.addnstr(top_y + 1, 0, clip("Open a web share with `w` from the Sessions tab, then return here.", width - 1), width - 1, curses.A_DIM)
+        return
+
+    for idx in range(scroll, min(len(shares), scroll + visible_rows)):
+        share = shares[idx]
+        row = top_y + idx - scroll
+        marker = ">" if idx == selected else " "
+        public_marker = "public" if share.get("public_url") else "local"
+        line = (
+            f"{marker} {format_share_age(str(share.get('started_at') or '')):>8}  "
+            f"{clip(str(share.get('mode') or 'serve'), 6):6}  "
+            f"{clip(public_marker, 6):6}  "
+            f"{clip(str(share.get('session_id') or ''), max(8, list_width - 28))}"
+        )
+        attr = curses.A_REVERSE if idx == selected else 0
+        stdscr.addnstr(row, 0, clip(line, list_width - 1), list_width - 1, attr)
+
+    share = shares[selected]
+    detail_width = max(10, width - detail_x - 1)
+    tunnel_state = "up" if share.get("tunnel_alive") else "down"
+    details = [
+        f"Session ID: {share.get('session_id', 'unknown')}",
+        f"Mode: {share.get('mode', 'unknown')}",
+        f"Started: {share.get('started_at', 'unknown')} ({format_share_age(str(share.get('started_at') or ''))})",
+        f"Bundle: {share.get('bundle_dir', 'unknown')}",
+        f"Local URL: {share.get('local_url', 'unknown')}",
+        f"Public URL: {share.get('public_url') or 'not exposed'}",
+        f"Server PID: {share.get('server_pid', 'unknown')}",
+        f"Tunnel PID: {share.get('tunnel_pid', 'none')} ({tunnel_state})",
+        "",
+        "Notes:",
+        "These rows are discovered from live share state files in /tmp.",
+        "Keys: x stop selected share, r refresh.",
+        "Closed or crashed sessions are removed automatically on refresh.",
+    ]
+    draw_lines(stdscr, top_y, detail_x, detail_width, [clip(line, detail_width) for line in details])
+
+
 def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query: str) -> str | None:
     curses.curs_set(0)
     stdscr.keypad(True)
     query = initial_query
     selected = 0
     scroll = 0
+    share_selected = 0
+    share_scroll = 0
+    active_tab = "sessions"
     status = ""
 
     while True:
         filtered = filter_sessions(sessions, query)
         if selected >= len(filtered):
             selected = max(0, len(filtered) - 1)
+        shares = list_active_shares("claude")
+        if share_selected >= len(shares):
+            share_selected = max(0, len(shares) - 1)
 
         height, width = stdscr.getmaxyx()
         list_width = max(40, min(72, width // 2))
         detail_x = list_width + 2
-        visible_rows = max(5, height - 5)
+        top_y = 5
+        visible_rows = max(5, height - top_y)
 
-        if selected < scroll:
-            scroll = selected
-        elif selected >= scroll + visible_rows:
-            scroll = selected - visible_rows + 1
+        if active_tab == "sessions":
+            if selected < scroll:
+                scroll = selected
+            elif selected >= scroll + visible_rows:
+                scroll = selected - visible_rows + 1
+        else:
+            if share_selected < share_scroll:
+                share_scroll = share_selected
+            elif share_selected >= share_scroll + visible_rows:
+                share_scroll = share_selected - visible_rows + 1
 
         stdscr.erase()
         stdscr.addnstr(0, 0, clip("Claude History Viewer", width - 1), width - 1, curses.A_BOLD)
-        help_text = "Up/Down move  Enter resumes  / filter  c command  e export  w web bundle  J/M/H quick export  q quit"
+        help_text = "Tab switch tab  Up/Down move  Enter resumes  / filter  c command  e export  w share start/stop  J/M/H quick export  q quit"
         stdscr.addnstr(1, 0, clip(help_text, width - 1), width - 1)
-        stdscr.addnstr(2, 0, clip(f"Filter: {query or '(none)'}", width - 1), width - 1, curses.A_DIM)
+        render_tabs(stdscr, width, active_tab)
+        info_text = f"Filter: {query or '(none)'}" if active_tab == "sessions" else f"Active shares: {len(shares)}"
+        stdscr.addnstr(3, 0, clip(info_text, width - 1), width - 1, curses.A_DIM)
         if status:
-            stdscr.addnstr(3, 0, clip(status, width - 1), width - 1, curses.A_DIM)
+            stdscr.addnstr(4, 0, clip(status, width - 1), width - 1, curses.A_DIM)
 
-        if not filtered:
-            stdscr.addnstr(5, 0, clip("No sessions matched the current filter.", width - 1), width - 1)
-            stdscr.refresh()
-            key = stdscr.getch()
-            if key in (ord("q"), 27):
-                return None
-            if key == ord("/"):
-                query = prompt_input(stdscr, "Filter")
-            elif key in (curses.KEY_BACKSPACE, 127):
-                query = query[:-1]
-            continue
+        if active_tab == "sessions":
+            if not filtered:
+                stdscr.addnstr(top_y, 0, clip("No sessions matched the current filter.", width - 1), width - 1)
+                stdscr.refresh()
+                key = stdscr.getch()
+                if key in (ord("q"), 27):
+                    return None
+                if key in (9, curses.KEY_BTAB):
+                    active_tab = "shares"
+                elif key == ord("/"):
+                    query = prompt_input(stdscr, "Filter")
+                elif key in (curses.KEY_BACKSPACE, 127):
+                    query = query[:-1]
+                continue
 
-        for idx in range(scroll, min(len(filtered), scroll + visible_rows)):
-            session = filtered[idx]
-            row = 5 + idx - scroll
-            marker = ">" if idx == selected else " "
-            line = f"{marker} {relative_age(session.sort_ts_ms):>8}  {clip(session.project, 28):28}  {clip(session.last_prompt or session.first_prompt, max(8, list_width - 44))}"
-            attr = curses.A_REVERSE if idx == selected else 0
-            stdscr.addnstr(row, 0, clip(line, list_width - 1), list_width - 1, attr)
+            for idx in range(scroll, min(len(filtered), scroll + visible_rows)):
+                session = filtered[idx]
+                row = top_y + idx - scroll
+                marker = ">" if idx == selected else " "
+                line = f"{marker} {relative_age(session.sort_ts_ms):>8}  {clip(session.project, 28):28}  {clip(session.last_prompt or session.first_prompt, max(8, list_width - 44))}"
+                attr = curses.A_REVERSE if idx == selected else 0
+                stdscr.addnstr(row, 0, clip(line, list_width - 1), list_width - 1, attr)
 
-        session = filtered[selected]
-        detail_width = max(10, width - detail_x - 1)
-        details = [
-            f"Session ID: {session.session_id}",
-            f"Project: {session.project}",
-            f"CWD: {session.cwd}",
-            f"Last activity: {format_ts(session.sort_ts_ms)} ({relative_age(session.sort_ts_ms)})",
-            f"Transcript: {session.transcript_path or 'not found'}",
-            f"Counts: messages={session.message_count} user={session.user_count} assistant={session.assistant_count}",
-            "",
-            "First prompt:",
-        ]
-        details.extend(textwrap.wrap(session.first_prompt or "(none found)", width=detail_width) or ["(none found)"])
-        details.append("")
-        details.append("Last prompt:")
-        details.extend(textwrap.wrap(session.last_prompt or "(none found)", width=detail_width) or ["(none found)"])
-        details.append("")
-        details.append("Resume command:")
-        details.append(f"cd {shell_quote(session.cwd)} && claude --resume {session.session_id}")
-        draw_lines(stdscr, 5, detail_x, detail_width, [clip(line, detail_width) for line in details])
+            session = filtered[selected]
+            detail_width = max(10, width - detail_x - 1)
+            details = [
+                f"Session ID: {session.session_id}",
+                f"Project: {session.project}",
+                f"CWD: {session.cwd}",
+                f"Last activity: {format_ts(session.sort_ts_ms)} ({relative_age(session.sort_ts_ms)})",
+                f"Transcript: {session.transcript_path or 'not found'}",
+                f"Counts: messages={session.message_count} user={session.user_count} assistant={session.assistant_count}",
+                "",
+                "First prompt:",
+            ]
+            details.extend(textwrap.wrap(session.first_prompt or "(none found)", width=detail_width) or ["(none found)"])
+            details.append("")
+            details.append("Last prompt:")
+            details.extend(textwrap.wrap(session.last_prompt or "(none found)", width=detail_width) or ["(none found)"])
+            details.append("")
+            active_session_shares = find_session_shares(shares, session.session_id)
+            if active_session_shares:
+                details.append(f"Web share: {len(active_session_shares)} active")
+                for share in active_session_shares[:2]:
+                    target = share.get("public_url") or share.get("local_url") or "unknown"
+                    details.append(f"- {share.get('mode', 'serve')}: {target}")
+                if len(active_session_shares) > 2:
+                    details.append(f"- +{len(active_session_shares) - 2} more")
+            else:
+                details.append("Web share: none")
+            details.append("")
+            details.append("Resume command:")
+            details.append(f"cd {shell_quote(session.cwd)} && claude --resume {session.session_id}")
+            draw_lines(stdscr, top_y, detail_x, detail_width, [clip(line, detail_width) for line in details])
+        else:
+            draw_share_view(
+                stdscr,
+                shares,
+                share_selected,
+                share_scroll,
+                top_y,
+                list_width,
+                detail_x,
+                width,
+                visible_rows,
+            )
 
         stdscr.refresh()
         key = stdscr.getch()
 
         if key in (ord("q"), 27):
             return None
-        if key in (curses.KEY_UP, ord("k")):
-            selected = max(0, selected - 1)
-        elif key in (curses.KEY_DOWN, ord("j")):
-            selected = min(len(filtered) - 1, selected + 1)
-        elif key in (curses.KEY_PPAGE,):
-            selected = max(0, selected - visible_rows)
-        elif key in (curses.KEY_NPAGE,):
-            selected = min(len(filtered) - 1, selected + visible_rows)
-        elif key in (10, 13, curses.KEY_ENTER):
-            return f"cd {shell_quote(session.cwd)} && claude --resume {session.session_id}"
-        elif key == ord("c"):
-            return f"claude --resume {session.session_id}"
-        elif key == ord("e"):
-            status = interactive_export(stdscr, session)
-        elif key == ord("w"):
-            status = interactive_web_bundle(stdscr, session)
-        elif key in (ord("J"), ord("M"), ord("H")):
-            export_format = {ord("J"): "json", ord("M"): "md", ord("H"): "html"}[key]
-            try:
-                path = export_session(session, export_format)
-                status = f"Exported {export_format} to {path}"
-            except OSError as exc:
-                status = f"Export failed: {exc}"
-        elif key == ord("/"):
-            query = prompt_input(stdscr, "Filter")
-            selected = 0
-            scroll = 0
-        elif key in (curses.KEY_BACKSPACE, 127):
-            query = query[:-1]
-            selected = 0
-            scroll = 0
+        if key in (9, curses.KEY_BTAB):
+            active_tab = "shares" if active_tab == "sessions" else "sessions"
+            status = ""
+            continue
+        if active_tab == "sessions":
+            if key in (curses.KEY_UP, ord("k")):
+                selected = max(0, selected - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                selected = min(len(filtered) - 1, selected + 1)
+            elif key in (curses.KEY_PPAGE,):
+                selected = max(0, selected - visible_rows)
+            elif key in (curses.KEY_NPAGE,):
+                selected = min(len(filtered) - 1, selected + visible_rows)
+            elif key in (10, 13, curses.KEY_ENTER):
+                return f"cd {shell_quote(session.cwd)} && claude --resume {session.session_id}"
+            elif key == ord("c"):
+                return f"claude --resume {session.session_id}"
+            elif key == ord("e"):
+                status = interactive_export(stdscr, session)
+            elif key == ord("w"):
+                existing = find_session_shares(shares, session.session_id)
+                if existing:
+                    action = prompt_choice(stdscr, "Share action [stop|restart|cancel]", {"stop", "restart", "cancel"})
+                    if action == "stop":
+                        for share in existing:
+                            stop_active_share(share)
+                        status = f"Stopped {len(existing)} web share(s) for {session.session_id}"
+                    elif action == "restart":
+                        for share in existing:
+                            stop_active_share(share)
+                        status = interactive_web_bundle(stdscr, session)
+                    else:
+                        status = "Share action cancelled."
+                else:
+                    status = interactive_web_bundle(stdscr, session)
+            elif key in (ord("J"), ord("M"), ord("H")):
+                export_format = {ord("J"): "json", ord("M"): "md", ord("H"): "html"}[key]
+                try:
+                    path = export_session(session, export_format)
+                    status = f"Exported {export_format} to {path}"
+                except OSError as exc:
+                    status = f"Export failed: {exc}"
+            elif key == ord("/"):
+                query = prompt_input(stdscr, "Filter")
+                selected = 0
+                scroll = 0
+            elif key in (curses.KEY_BACKSPACE, 127):
+                query = query[:-1]
+                selected = 0
+                scroll = 0
+        else:
+            if key in (curses.KEY_UP, ord("k")):
+                share_selected = max(0, share_selected - 1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                share_selected = min(max(0, len(shares) - 1), share_selected + 1)
+            elif key in (curses.KEY_PPAGE,):
+                share_selected = max(0, share_selected - visible_rows)
+            elif key in (curses.KEY_NPAGE,):
+                share_selected = min(max(0, len(shares) - 1), share_selected + visible_rows)
+            elif key == ord("r"):
+                status = f"Refreshed active share list ({len(shares)} found)"
+            elif key == ord("x") and shares:
+                share = shares[share_selected]
+                stop_active_share(share)
+                status = f"Stopped share for {share.get('session_id', 'unknown session')}"
+            elif key == ord("/"):
+                status = "Filtering is only available on the Sessions tab."
+            elif key in (10, 13, curses.KEY_ENTER):
+                status = "Enter resumes sessions only. Switch to the Sessions tab for resume commands."
 
 
 def prompt_input(stdscr: curses.window, label: str) -> str:
@@ -512,21 +680,6 @@ def prompt_choice(stdscr: curses.window, label: str, allowed: set[str]) -> str:
         return ""
     value = value.lower()
     return value if value in allowed else ""
-
-
-def pause_bundle_session(stdscr: curses.window, title: str, lines: list[str]) -> None:
-    curses.def_prog_mode()
-    curses.endwin()
-    try:
-        print(title)
-        print("")
-        for line in lines:
-            print(line)
-        print("")
-        input("Press Enter to stop the viewer session and return...")
-    finally:
-        curses.reset_prog_mode()
-        stdscr.refresh()
 
 
 def build_claude_export(session: SessionSummary) -> dict:
@@ -706,23 +859,17 @@ def interactive_web_bundle(stdscr: curses.window, session: SessionSummary) -> st
     keep_bundle = keep_raw.lower() in {"y", "yes"}
     try:
         path = write_web_bundle(session, output_dir=output_hint, temp=not bool(output_hint))
-        served = serve_bundle(path, with_tunnel=(mode == "tunnel"), keep_bundle=keep_bundle)
+        served = serve_bundle(
+            path,
+            with_tunnel=(mode == "tunnel"),
+            keep_bundle=keep_bundle,
+            tool="claude",
+            session_id=session.session_id,
+        )
     except Exception as exc:
         return f"Bundle serve failed: {exc}"
-
-    lines = [
-        f"Bundle directory: {served.bundle_dir}",
-        f"Local URL: {served.local_url}",
-    ]
-    if served.public_url:
-        lines.append(f"Tunnel URL: {served.public_url}")
-    lines.append("Only this bundle directory is being served.")
-    lines.append("When you leave this screen, the local server and tunnel will stop.")
-    try:
-        pause_bundle_session(stdscr, "Web bundle session is live.", lines)
-    finally:
-        served.close()
-    return f"Stopped web bundle session for {session.session_id}"
+    target_url = served.public_url or served.local_url
+    return f"Started {mode} share for {session.session_id}: {target_url}"
 
 
 def main() -> int:
