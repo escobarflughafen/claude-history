@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VIEWER="${CLAUDE_HISTORY_VIEWER_PY:-$SCRIPT_DIR/claude_history_viewer.py}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+tmp_output="$(mktemp)"
+cleanup() {
+  rm -f "$tmp_output"
+}
+trap cleanup EXIT
+
+if [[ ! -f "$VIEWER" ]]; then
+  echo "Viewer script not found: $VIEWER" >&2
+  exit 1
+fi
+
+if [[ ! -t 0 || ! -t 1 ]]; then
+  echo "claude-history requires an interactive terminal." >&2
+  exit 1
+fi
+
+"$PYTHON_BIN" "$VIEWER" --output-file "$tmp_output" "$@" < /dev/tty > /dev/tty || exit $?
+
+selection="$(cat "$tmp_output")"
+
+if [[ -z "${selection// }" ]]; then
+  exit 0
+fi
+
+if [[ "$selection" != cd\ * && "$selection" != claude\ --resume\ * ]]; then
+  echo "Viewer did not return an executable resume command." >&2
+  echo "Output was:" >&2
+  printf '%s\n' "$selection" >&2
+  exit 1
+fi
+
+echo "Executing: $selection" >&2
+exec bash -lc "$selection"
