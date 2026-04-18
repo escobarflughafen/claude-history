@@ -3,9 +3,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VIEWER="${CLAUDE_HISTORY_VIEWER_PY:-$SCRIPT_DIR/claude_history_viewer.py}"
+VIEWER="${CODEX_HISTORY_VIEWER_PY:-$SCRIPT_DIR/codex_history_viewer.py}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 tmp_output="$(mktemp)"
+
 cleanup() {
   rm -f "$tmp_output"
 }
@@ -23,7 +24,7 @@ for arg in "$@"; do
 done
 
 if [[ ! -t 0 || ! -t 1 ]]; then
-  echo "claude-history requires an interactive terminal." >&2
+  echo "codex-history requires an interactive terminal." >&2
   exit 1
 fi
 
@@ -35,7 +36,7 @@ if [[ -z "${selection// }" ]]; then
   exit 0
 fi
 
-if [[ "$selection" != cd\ * && "$selection" != claude\ --resume\ * ]]; then
+if [[ "$selection" != cd\ * && "$selection" != codex\ resume\ * ]]; then
   echo "Viewer did not return an executable resume command." >&2
   echo "Output was:" >&2
   printf '%s\n' "$selection" >&2

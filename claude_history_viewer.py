@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from export_utils import format_export_ts, now_iso, write_export
+
 
 DEFAULT_CLAUDE_DIR = Path.home() / ".claude"
 
@@ -72,6 +74,21 @@ def parse_args() -> argparse.Namespace:
         "--output-file",
         default="",
         help="When set, write the selected resume command to this file instead of stdout.",
+    )
+    parser.add_argument(
+        "--session-id",
+        default="",
+        help="Session ID to export in non-interactive mode.",
+    )
+    parser.add_argument(
+        "--export",
+        choices=["json", "md", "html"],
+        help="Export a session conversation in the selected format.",
+    )
+    parser.add_argument(
+        "--output",
+        default="",
+        help="Output path for --export. Defaults to ./claude-session-<id>.<ext>.",
     )
     return parser.parse_args()
 
@@ -332,6 +349,7 @@ def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query
     query = initial_query
     selected = 0
     scroll = 0
+    status = ""
 
     while True:
         filtered = filter_sessions(sessions, query)
@@ -350,12 +368,14 @@ def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query
 
         stdscr.erase()
         stdscr.addnstr(0, 0, clip("Claude History Viewer", width - 1), width - 1, curses.A_BOLD)
-        help_text = "Up/Down move  Enter prints resume command  / filter  c copy command view  q quit"
+        help_text = "Up/Down move  Enter resumes  / filter  c command  e export  J/M/H quick export  q quit"
         stdscr.addnstr(1, 0, clip(help_text, width - 1), width - 1)
         stdscr.addnstr(2, 0, clip(f"Filter: {query or '(none)'}", width - 1), width - 1, curses.A_DIM)
+        if status:
+            stdscr.addnstr(3, 0, clip(status, width - 1), width - 1, curses.A_DIM)
 
         if not filtered:
-            stdscr.addnstr(4, 0, clip("No sessions matched the current filter.", width - 1), width - 1)
+            stdscr.addnstr(5, 0, clip("No sessions matched the current filter.", width - 1), width - 1)
             stdscr.refresh()
             key = stdscr.getch()
             if key in (ord("q"), 27):
@@ -368,7 +388,7 @@ def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query
 
         for idx in range(scroll, min(len(filtered), scroll + visible_rows)):
             session = filtered[idx]
-            row = 4 + idx - scroll
+            row = 5 + idx - scroll
             marker = ">" if idx == selected else " "
             line = f"{marker} {relative_age(session.sort_ts_ms):>8}  {clip(session.project, 28):28}  {clip(session.last_prompt or session.first_prompt, max(8, list_width - 44))}"
             attr = curses.A_REVERSE if idx == selected else 0
@@ -393,7 +413,7 @@ def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query
         details.append("")
         details.append("Resume command:")
         details.append(f"cd {shell_quote(session.cwd)} && claude --resume {session.session_id}")
-        draw_lines(stdscr, 4, detail_x, detail_width, [clip(line, detail_width) for line in details])
+        draw_lines(stdscr, 5, detail_x, detail_width, [clip(line, detail_width) for line in details])
 
         stdscr.refresh()
         key = stdscr.getch()
@@ -412,6 +432,15 @@ def run_tui(stdscr: curses.window, sessions: list[SessionSummary], initial_query
             return f"cd {shell_quote(session.cwd)} && claude --resume {session.session_id}"
         elif key == ord("c"):
             return f"claude --resume {session.session_id}"
+        elif key == ord("e"):
+            status = interactive_export(stdscr, session)
+        elif key in (ord("J"), ord("M"), ord("H")):
+            export_format = {ord("J"): "json", ord("M"): "md", ord("H"): "html"}[key]
+            try:
+                path = export_session(session, export_format)
+                status = f"Exported {export_format} to {path}"
+            except OSError as exc:
+                status = f"Export failed: {exc}"
         elif key == ord("/"):
             query = prompt_input(stdscr, "Filter")
             selected = 0
@@ -451,6 +480,115 @@ def shell_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
+def interactive_export(stdscr: curses.window, session: SessionSummary) -> str:
+    format_value = prompt_input(stdscr, "Export format [json|md|html]")
+    if not format_value:
+        return "Export cancelled."
+    format_value = format_value.lower()
+    if format_value not in {"json", "md", "html"}:
+        return f"Unsupported export format: {format_value}"
+    default_name = f"claude-session-{session.session_id}.{format_value}"
+    output_value = prompt_input(stdscr, f"Output path [{default_name}]")
+    output_path = output_value or default_name
+    try:
+        path = export_session(session, format_value, output_path)
+    except OSError as exc:
+        return f"Export failed: {exc}"
+    return f"Exported {format_value} to {path}"
+
+
+def build_claude_export(session: SessionSummary) -> dict:
+    raw_entries: list[dict] = []
+    messages: list[dict] = []
+    metadata = {"project": session.project}
+    if session.transcript_path and session.transcript_path.exists():
+        for entry in read_jsonl(session.transcript_path):
+            raw_entries.append(entry)
+            role = "meta"
+            kind = "message"
+            text = ""
+            extra: dict[str, object] = {}
+            entry_type = entry.get("type")
+            if entry_type == "user":
+                role = "meta" if entry.get("isMeta") else "user"
+                text = compact_text(entry.get("message", {}).get("content"), max_len=20000)
+            elif entry_type == "assistant":
+                role = "assistant"
+                text = compact_text(entry.get("message", {}).get("content"), max_len=20000)
+            elif entry_type == "summary":
+                role = "system"
+                kind = "summary"
+                text = compact_text(entry.get("summary"), max_len=20000)
+            elif entry_type == "attachment":
+                role = "system"
+                kind = "attachment"
+                attachment = entry.get("attachment", {})
+                if isinstance(attachment, dict) and attachment.get("type"):
+                    extra["attachment_type"] = attachment.get("type")
+                    attachment_type = str(attachment.get("type"))
+                    if attachment_type == "skill_listing":
+                        text = "Skill listing attached for session startup."
+                    elif attachment_type == "deferred_tools_delta":
+                        added = len(attachment.get("addedNames") or [])
+                        removed = len(attachment.get("removedNames") or [])
+                        text = f"Deferred tools changed: {added} added, {removed} removed."
+                    elif attachment_type == "auto_mode":
+                        text = "Auto mode metadata attached."
+                    else:
+                        text = compact_text(attachment.get("content") or attachment, max_len=1200)
+                else:
+                    text = compact_text(attachment.get("content") or attachment, max_len=1200)
+            elif entry_type == "permission-mode":
+                role = "system"
+                kind = "permission-mode"
+                text = f"Permission mode set to {entry.get('permissionMode', 'unknown')}."
+            elif entry_type == "last-prompt":
+                role = "system"
+                kind = "last-prompt"
+                text = compact_text(entry.get("lastPrompt"), max_len=20000)
+            else:
+                role = "meta"
+                kind = str(entry_type or "event")
+                text = compact_text(entry, max_len=1200)
+
+            messages.append(
+                {
+                    "timestamp": format_export_ts(parse_timestamp_ms(entry.get("timestamp"))),
+                    "role": role,
+                    "kind": kind,
+                    "raw_type": entry_type,
+                    "text": text,
+                    "extra": extra or None,
+                }
+            )
+
+    return {
+        "schema_version": 1,
+        "tool": "claude",
+        "exported_at": now_iso(),
+        "session": {
+            "session_id": session.session_id,
+            "project": session.project,
+            "cwd": session.cwd,
+            "started_at": format_export_ts(session.first_ts_ms),
+            "last_activity": format_export_ts(session.last_ts_ms),
+            "transcript_path": str(session.transcript_path) if session.transcript_path else None,
+            "first_prompt": session.first_prompt,
+            "last_prompt": session.last_prompt,
+            "message_count": session.message_count,
+            "user_count": session.user_count,
+            "assistant_count": session.assistant_count,
+        },
+        "metadata": metadata,
+        "messages": messages,
+        "raw_entries": raw_entries,
+    }
+
+
+def export_session(session: SessionSummary, export_format: str, output: str = "") -> Path:
+    return write_export(build_claude_export(session), export_format, output)
+
+
 def main() -> int:
     args = parse_args()
     claude_dir = Path(os.path.expanduser(args.claude_dir))
@@ -460,6 +598,18 @@ def main() -> int:
     except FileNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 1
+
+    if args.export:
+        if not args.session_id:
+            print("--export requires --session-id", file=sys.stderr)
+            return 1
+        session = next((item for item in sessions if item.session_id == args.session_id), None)
+        if session is None:
+            print(f"Unknown session id: {args.session_id}", file=sys.stderr)
+            return 1
+        path = export_session(session, args.export, args.output)
+        print(str(path))
+        return 0
 
     if args.json:
         payload = [

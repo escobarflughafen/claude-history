@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+claude-session-*.json
+claude-session-*.md
+claude-session-*.html
+codex-session-*.json
+codex-session-*.md
+codex-session-*.html
