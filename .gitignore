@@ -6,3 +6,4 @@ claude-session-*.html
 codex-session-*.json
 codex-session-*.md
 codex-session-*.html
+.bundle-check*/
