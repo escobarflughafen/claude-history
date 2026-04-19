@@ -55,6 +55,14 @@ Optional:
 
 - `cloudflared` for temporary public tunnel mode
 
+Deployment-time checks now also report whether these CLIs are present in `PATH`:
+
+- `claude`
+- `codex`
+- `cloudflared`
+
+The deploy script does not require `claude` or `codex` to be installed, because some machines may only need one viewer, but it will warn clearly when either runtime command is missing.
+
 ## Install
 
 ### Quick Local Use
@@ -73,6 +81,16 @@ Use the deploy script:
 ```bash
 sudo ./deploy-claude-history.sh
 ```
+
+What the deploy script validates:
+
+- `bash`
+- `python3` `3.10+`
+- required repo files
+- launcher syntax and Python module compilation
+- whether `claude`, `codex`, and `cloudflared` are available in `PATH`
+
+If `cloudflared` is missing, the installer now explains that only `tunnel` mode is affected and, in an interactive terminal, asks whether installation should continue without tunnel support.
 
 The deploy script installs:
 
