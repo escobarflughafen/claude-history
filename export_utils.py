@@ -21,7 +21,8 @@ from pathlib import Path
 
 SCHEMA_VERSION = 1
 TRYCLOUDFLARE_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
-SHARE_STATE_DIR = Path(tempfile.gettempdir()) / "history-viewer-shares"
+TEMP_ROOT = Path(tempfile.gettempdir())
+SHARE_STATE_DIR = TEMP_ROOT / "history-viewer-shares"
 
 
 def now_iso() -> str:
@@ -44,7 +45,7 @@ def make_bundle_dir(tool: str, session_id: str, output_dir: str = "", temp: bool
     if output_dir:
         bundle_dir = Path(output_dir).expanduser()
     elif temp:
-        bundle_dir = Path(tempfile.mkdtemp(prefix=f"{tool}-session-{session_id}-", dir="/tmp"))
+        bundle_dir = Path(tempfile.mkdtemp(prefix=f"{tool}-session-{session_id}-", dir=str(TEMP_ROOT)))
     else:
         bundle_dir = Path.cwd() / f"{tool}-session-{session_id}-bundle"
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -113,6 +114,7 @@ def render_bundle_readme(bundle: dict) -> str:
             ```bash
             python3 import_claude_bundle.py --bundle ./session.json
             python3 import_claude_bundle.py --bundle ./session.json --import-cwd /path/to/restored/project
+            python3 import_claude_bundle.py --bundle ./session.json --import-dry-run
             python3 import_claude_bundle.py --bundle ./session.json --import-session-id "$(python3 - <<'PY'
             import uuid
             print(uuid.uuid4())
@@ -290,6 +292,9 @@ def encode_project_path(project: str) -> str:
     return "".join("-" if ch == "/" else ch for ch in project.replace("\\", "/").replace(":", "")) or "-"
 
 
+TEMP_ROOT = Path(tempfile.gettempdir())
+
+
 def safe_extract_zip(source: Path, destination: Path):
     with zipfile.ZipFile(source) as archive:
         base = destination.resolve()
@@ -318,7 +323,7 @@ def resolve_bundle_payload(source: Path):
             raise FileNotFoundError(f"Bundle directory missing session.json: {source}")
         return json.loads(session_json.read_text(encoding="utf-8")), None
     if source.suffix.lower() == ".zip":
-        temp_dir = Path(tempfile.mkdtemp(prefix="claude-bundle-import-", dir="/tmp"))
+        temp_dir = Path(tempfile.mkdtemp(prefix="claude-bundle-import-", dir=str(TEMP_ROOT)))
         safe_extract_zip(source, temp_dir)
         session_json = temp_dir / "session.json"
         if not session_json.exists():
@@ -379,6 +384,11 @@ def import_bundle(source_path: str, claude_dir: Path, *, force: bool = False, se
         project = str(Path(project).expanduser())
         if not os.path.isabs(project):
             raise ValueError("Imported project path must be absolute. Use --import-cwd with an absolute path.")
+        if not cwd_override and not Path(project).exists():
+            raise ValueError(
+                "Imported project path does not exist on this host. "
+                "Use --import-cwd to rewrite the session to a local destination path."
+            )
         transcript_entries = rewritten_raw_entries(bundle, session_id, project)
         if not transcript_entries:
             raise ValueError("Bundle does not contain raw Claude transcript entries.")

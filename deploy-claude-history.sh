@@ -3,8 +3,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INSTALL_ROOT="${INSTALL_ROOT:-/opt/claude-history}"
-BIN_DIR="${BIN_DIR:-/usr/local/bin}"
+UNAME_S="$(uname -s)"
+DEFAULT_INSTALL_ROOT="/opt/claude-history"
+DEFAULT_BIN_DIR="/usr/local/bin"
+if [[ "$UNAME_S" == "Darwin" ]]; then
+  DEFAULT_INSTALL_ROOT="/usr/local/share/claude-history"
+fi
+INSTALL_ROOT="${INSTALL_ROOT:-$DEFAULT_INSTALL_ROOT}"
+BIN_DIR="${BIN_DIR:-$DEFAULT_BIN_DIR}"
 CLAUDE_COMMAND_NAME="${CLAUDE_COMMAND_NAME:-claude-history}"
 CODEX_COMMAND_NAME="${CODEX_COMMAND_NAME:-codex-history}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -30,6 +36,12 @@ fi
 
 command -v install >/dev/null 2>&1 || die "'install' command not found"
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "Python interpreter not found: $PYTHON_BIN"
+command -v bash >/dev/null 2>&1 || die "'bash' command not found"
+
+"$PYTHON_BIN" - <<'PY' || die "Python 3.10+ is required."
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+PY
 
 require_file "$SCRIPT_DIR/export_utils.py"
 require_file "$SCRIPT_DIR/claude_history_viewer.py"
@@ -85,6 +97,7 @@ CODEX_HELP="$("$PYTHON_BIN" "$INSTALL_ROOT/codex_history_viewer.py" --help >/dev
 [[ "$CODEX_HELP" == "ok" ]] || die "Installed Codex viewer failed --help validation"
 
 echo "Installed successfully:"
+echo "  platform: $UNAME_S"
 echo "  install root: $INSTALL_ROOT"
 echo "  shared module: $INSTALL_ROOT/export_utils.py"
 echo "  claude viewer: $INSTALL_ROOT/claude_history_viewer.py"
@@ -99,8 +112,12 @@ echo "  $CLAUDE_COMMAND_NAME"
 echo "  $CODEX_COMMAND_NAME"
 echo
 echo "Notes:"
+echo "  - requires Python 3.10+"
 echo "  - local export and local bundle serving work with Python only"
 echo "  - temporary public tunnel mode also requires 'cloudflared' in PATH"
+if [[ "$UNAME_S" == "Darwin" ]]; then
+  echo "  - on macOS, ensure /usr/local/bin is in PATH for all intended users"
+fi
 if command -v cloudflared >/dev/null 2>&1; then
   echo "  - detected cloudflared: $(cloudflared --version | head -n 1)"
 else
