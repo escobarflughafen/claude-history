@@ -14,9 +14,12 @@ import curses
 import datetime as dt
 import json
 import os
+import shutil
 import tempfile
 import sys
 import textwrap
+import uuid
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -103,6 +106,31 @@ def parse_args() -> argparse.Namespace:
         "--active-shares",
         action="store_true",
         help="Print all active web shares and wait for Enter before exiting.",
+    )
+    parser.add_argument(
+        "--import-bundle",
+        default="",
+        help="Import a Claude session bundle from a JSON export, bundle directory, or package.zip.",
+    )
+    parser.add_argument(
+        "--import-force",
+        action="store_true",
+        help="Overwrite an existing imported transcript/history for the same session ID.",
+    )
+    parser.add_argument(
+        "--import-session-id",
+        default="",
+        help="Override the imported session ID with a new UUID.",
+    )
+    parser.add_argument(
+        "--import-cwd",
+        default="",
+        help="Override the imported working directory/project path.",
+    )
+    parser.add_argument(
+        "--import-dry-run",
+        action="store_true",
+        help="Validate the bundle and print the files that would be written without modifying Claude state.",
     )
     return parser.parse_args()
 
@@ -400,6 +428,199 @@ def show_active_shares_report(tool: str) -> int:
         print("")
         input("Press Enter to exit...")
     return 0
+
+
+def encode_project_path(project: str) -> str:
+    value = project.replace("\\", "/")
+    value = value.replace(":", "")
+    value = re_sub_slashes(value)
+    return value or "-"
+
+
+def re_sub_slashes(value: str) -> str:
+    out = []
+    for ch in value:
+        out.append("-" if ch == "/" else ch)
+    return "".join(out)
+
+
+def safe_extract_zip(source: Path, destination: Path) -> None:
+    with zipfile.ZipFile(source) as archive:
+        for member in archive.infolist():
+            member_path = Path(member.filename)
+            if member_path.is_absolute():
+                raise ValueError(f"Refusing to extract absolute zip path: {member.filename}")
+            target = (destination / member_path).resolve()
+            if os.path.commonpath([str(destination.resolve()), str(target)]) != str(destination.resolve()):
+                raise ValueError(f"Refusing to extract path outside bundle temp dir: {member.filename}")
+        archive.extractall(destination)
+
+
+def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding=encoding, dir=str(path.parent), delete=False) as handle:
+        handle.write(content)
+        temp_name = handle.name
+    Path(temp_name).replace(path)
+
+
+def resolve_bundle_payload(source: Path) -> tuple[dict, Path | None]:
+    if source.is_dir():
+        session_json = source / "session.json"
+        if not session_json.exists():
+            raise FileNotFoundError(f"Bundle directory missing session.json: {source}")
+        return json.loads(session_json.read_text(encoding="utf-8")), None
+
+    if source.suffix.lower() == ".zip":
+        temp_dir = Path(tempfile.mkdtemp(prefix="claude-bundle-import-", dir="/tmp"))
+        safe_extract_zip(source, temp_dir)
+        session_json = temp_dir / "session.json"
+        if not session_json.exists():
+            raise FileNotFoundError(f"Bundle zip missing session.json: {source}")
+        return json.loads(session_json.read_text(encoding="utf-8")), temp_dir
+
+    return json.loads(source.read_text(encoding="utf-8")), None
+
+
+def bundle_to_history_entries(bundle: dict, project: str, session_id: str) -> list[dict]:
+    entries: list[dict] = []
+    raw_entries = bundle.get("raw_entries", [])
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "user" or entry.get("isMeta"):
+            continue
+        text = extract_user_prompt(entry)
+        if not text:
+            continue
+        timestamp = parse_timestamp_ms(entry.get("timestamp")) or 0
+        entries.append(
+            {
+                "display": text,
+                "pastedContents": {},
+                "timestamp": timestamp,
+                "project": project,
+                "sessionId": session_id,
+            }
+        )
+    if entries:
+        return entries
+    session = bundle.get("session", {})
+    fallback_prompt = session.get("first_prompt") or session.get("last_prompt") or ""
+    fallback_ts = parse_timestamp_ms(session.get("started_at")) or parse_timestamp_ms(session.get("last_activity")) or 0
+    if fallback_prompt:
+        return [
+            {
+                "display": str(fallback_prompt),
+                "pastedContents": {},
+                "timestamp": fallback_ts,
+                "project": project,
+                "sessionId": session_id,
+            }
+        ]
+    return []
+
+
+def rewritten_raw_entries(bundle: dict, session_id: str, cwd: str) -> list[dict]:
+    entries: list[dict] = []
+    for raw in bundle.get("raw_entries", []):
+        if not isinstance(raw, dict):
+            continue
+        entry = json.loads(json.dumps(raw))
+        entry["sessionId"] = session_id
+        if "cwd" in entry or entry.get("type") in {"user", "assistant", "attachment"}:
+            entry["cwd"] = cwd
+        entries.append(entry)
+    return entries
+
+
+def import_claude_bundle(
+    source_path: str,
+    claude_dir: Path,
+    *,
+    force: bool = False,
+    session_id_override: str = "",
+    cwd_override: str = "",
+    dry_run: bool = False,
+) -> dict:
+    source = Path(source_path).expanduser()
+    if not source.exists():
+        raise FileNotFoundError(f"Bundle source not found: {source}")
+
+    bundle, temp_dir = resolve_bundle_payload(source)
+    try:
+        if bundle.get("tool") != "claude":
+            raise ValueError("Bundle is not a Claude export.")
+
+        session = bundle.get("session", {})
+        session_id = session_id_override or str(session.get("session_id") or "")
+        if not session_id:
+            raise ValueError("Bundle is missing session.session_id.")
+        uuid.UUID(session_id)
+
+        project = cwd_override or str(session.get("cwd") or session.get("project") or "")
+        if not project:
+            raise ValueError("Bundle is missing session working directory/project.")
+        project = str(Path(project).expanduser())
+        if not os.path.isabs(project):
+            raise ValueError("Imported project path must be absolute. Use --import-cwd with an absolute path.")
+
+        transcript_entries = rewritten_raw_entries(bundle, session_id, project)
+        if not transcript_entries:
+            raise ValueError("Bundle does not contain raw Claude transcript entries.")
+
+        projects_dir = claude_dir / "projects" / encode_project_path(project)
+        transcript_path = projects_dir / f"{session_id}.jsonl"
+        history_path = claude_dir / "history.jsonl"
+        history_entries = bundle_to_history_entries(bundle, project, session_id)
+        writes = [
+            str(transcript_path),
+            str(history_path),
+        ]
+
+        if transcript_path.exists() and not force:
+            raise FileExistsError(
+                f"Session transcript already exists: {transcript_path}. Use --import-force or --import-session-id."
+            )
+
+        if dry_run:
+            return {
+                "session_id": session_id,
+                "project": project,
+                "transcript_path": str(transcript_path),
+                "history_entries": len(history_entries),
+                "would_write": writes,
+                "warning": "Import dry run only. No files were modified.",
+            }
+
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        projects_dir.mkdir(parents=True, exist_ok=True)
+        (projects_dir / "memory").mkdir(parents=True, exist_ok=True)
+
+        transcript_text = "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in transcript_entries)
+        atomic_write_text(transcript_path, transcript_text, encoding="utf-8")
+
+        existing_history: list[dict] = []
+        if history_path.exists():
+            existing_history = [entry for entry in read_jsonl(history_path) if entry.get("sessionId") != session_id]
+        existing_history.extend(history_entries)
+        existing_history.sort(key=lambda item: int(item.get("timestamp") or 0))
+        atomic_write_text(
+            history_path,
+            "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in existing_history),
+            encoding="utf-8",
+        )
+
+        return {
+            "session_id": session_id,
+            "project": project,
+            "transcript_path": str(transcript_path),
+            "history_entries": len(history_entries),
+            "wrote": writes,
+        }
+    finally:
+        if temp_dir and temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def format_share_age(started_at: str) -> str:
@@ -953,6 +1174,18 @@ def main() -> int:
 
     if args.active_shares:
         return show_active_shares_report("claude")
+
+    if args.import_bundle:
+        imported = import_claude_bundle(
+            args.import_bundle,
+            claude_dir,
+            force=args.import_force,
+            session_id_override=args.import_session_id,
+            cwd_override=args.import_cwd,
+            dry_run=args.import_dry_run,
+        )
+        print(json.dumps(imported, indent=2))
+        return 0
 
     try:
         sessions = load_sessions(claude_dir, limit=args.limit)

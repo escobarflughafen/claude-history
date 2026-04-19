@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from pathlib import Path
 
@@ -68,13 +69,396 @@ def write_bundle(bundle: dict, output_dir: str = "", temp: bool = False) -> Path
     bundle_dir = make_bundle_dir(bundle["tool"], bundle["session"]["session_id"], output_dir, temp=temp)
     session_json = bundle_dir / "session.json"
     index_html = bundle_dir / "index.html"
+    readme_md = bundle_dir / "README.md"
+    transcript_jsonl = bundle_dir / "transcript.jsonl"
     zip_path = bundle_dir / "package.zip"
     session_json.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
     index_html.write_text(render_bundle_index(bundle), encoding="utf-8")
+    readme_md.write_text(render_bundle_readme(bundle), encoding="utf-8")
+    transcript_jsonl.write_text(render_bundle_transcript(bundle), encoding="utf-8")
+    if bundle.get("tool") == "claude":
+        importer_path = bundle_dir / "import_claude_bundle.py"
+        importer_path.write_text(render_claude_importer_script(), encoding="utf-8")
     tmp_zip = shutil.make_archive(str(bundle_dir / "package"), "zip", root_dir=bundle_dir)
     if Path(tmp_zip) != zip_path:
         shutil.move(tmp_zip, zip_path)
     return bundle_dir
+
+
+def render_bundle_transcript(bundle: dict) -> str:
+    raw_entries = bundle.get("raw_entries", [])
+    if not raw_entries:
+        return ""
+    return "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in raw_entries if isinstance(entry, dict))
+
+
+def render_bundle_readme(bundle: dict) -> str:
+    tool = str(bundle.get("tool") or "session")
+    session = bundle.get("session", {})
+    session_id = session.get("session_id", "unknown")
+    cwd = session.get("cwd", "unknown")
+    if tool == "claude":
+        import_block = textwrap.dedent(
+            f"""\
+            ## Import Into Claude Code
+
+            This bundle includes a standalone importer:
+
+            ```bash
+            python3 import_claude_bundle.py
+            ```
+
+            Typical usage:
+
+            ```bash
+            python3 import_claude_bundle.py --bundle ./session.json
+            python3 import_claude_bundle.py --bundle ./session.json --import-cwd /path/to/restored/project
+            python3 import_claude_bundle.py --bundle ./session.json --import-session-id "$(python3 - <<'PY'
+            import uuid
+            print(uuid.uuid4())
+            PY
+            )"
+            ```
+
+            After import, resume from the matching working directory:
+
+            ```bash
+            cd /path/to/restored/project
+            claude --resume {session_id}
+            ```
+
+            Notes:
+
+            - Treat downloaded bundles as sensitive. They may contain prompts, tool outputs, and file content from the original session.
+            - Only run `import_claude_bundle.py` on bundles from trusted sources.
+            - Claude must already be installed and authenticated on the destination host.
+            - The working directory used for resume must match the imported project path.
+            - `transcript.jsonl` is the raw session transcript shipped for inspection and migration.
+            """
+        )
+    else:
+        import_block = textwrap.dedent(
+            """\
+            ## Contents
+
+            - `session.json`: exported session metadata and analytics
+            - `transcript.jsonl`: raw session transcript entries when available
+            - `index.html`: portable viewer
+            - `package.zip`: zipped copy of the bundle
+            """
+        )
+
+    return textwrap.dedent(
+        f"""\
+        # {tool.capitalize()} Session Bundle
+
+        ## Session
+
+        - Session ID: `{session_id}`
+        - Working directory: `{cwd}`
+        - Exported at: `{bundle.get('exported_at', 'unknown')}`
+        - Message count: `{len(bundle.get('messages', []))}`
+
+        ## Files
+
+        - `session.json`: structured export with metadata, analytics, messages, and raw entries
+        - `transcript.jsonl`: raw transcript entries suitable for migration and inspection
+        - `index.html`: self-contained web viewer
+        - `package.zip`: zipped copy of this directory
+        {"- `import_claude_bundle.py`: standalone Claude session importer" if tool == "claude" else ""}
+
+        ## Command-Line Download
+
+        If this bundle is served over HTTP, you can download the full package:
+
+        ```bash
+        curl -O http://HOST:PORT/package.zip
+        ```
+
+        Or fetch individual files:
+
+        ```bash
+        curl -O http://HOST:PORT/session.json
+        curl -O http://HOST:PORT/transcript.jsonl
+        curl -O http://HOST:PORT/README.md
+        {"curl -O http://HOST:PORT/import_claude_bundle.py" if tool == "claude" else ""}
+        ```
+
+        ## Security Notes
+
+        - This bundle may contain sensitive transcript content, prompts, tool results, and file excerpts.
+        - Only import bundles from trusted sources.
+        - Import affects Claude session state under `~/.claude`; it does not restore arbitrary workspace files by itself.
+
+        {import_block.rstrip()}
+        """
+    ).rstrip() + "\n"
+
+
+def render_claude_importer_script() -> str:
+    return textwrap.dedent(
+        r'''#!/usr/bin/env python3
+"""Standalone importer for a Claude session bundle."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import os
+import shutil
+import tempfile
+import uuid
+import zipfile
+from pathlib import Path
+
+
+def read_jsonl(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def compact_text(value, max_len: int = 200) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item.get("content"), str):
+                    parts.append(item["content"])
+            elif isinstance(item, str):
+                parts.append(item)
+        text = " ".join(parts)
+    elif isinstance(value, dict):
+        if isinstance(value.get("content"), str):
+            text = value["content"]
+        elif isinstance(value.get("content"), list):
+            text = compact_text(value["content"], max_len=max_len)
+        else:
+            text = json.dumps(value, ensure_ascii=True)
+    else:
+        text = str(value)
+    text = " ".join(text.split())
+    return text[: max_len - 1] + "…" if len(text) > max_len else text
+
+
+def parse_timestamp_ms(value):
+    if isinstance(value, (int, float)):
+        return int(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        if value.endswith("Z"):
+            parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        else:
+            parsed = dt.datetime.fromisoformat(value)
+        return int(parsed.timestamp() * 1000)
+    except ValueError:
+        return None
+
+
+def extract_user_prompt(entry: dict) -> str:
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    text = compact_text(content)
+    if not text:
+        return ""
+    if text.startswith("<local-command-caveat>"):
+        return ""
+    if text.startswith("<local-command-stdout>"):
+        return ""
+    if "<command-name>" in text and "<command-message>" in text:
+        return ""
+    return text
+
+
+def encode_project_path(project: str) -> str:
+    return "".join("-" if ch == "/" else ch for ch in project.replace("\\", "/").replace(":", "")) or "-"
+
+
+def safe_extract_zip(source: Path, destination: Path):
+    with zipfile.ZipFile(source) as archive:
+        base = destination.resolve()
+        for member in archive.infolist():
+            member_path = Path(member.filename)
+            if member_path.is_absolute():
+                raise ValueError(f"Refusing to extract absolute zip path: {member.filename}")
+            target = (destination / member_path).resolve()
+            if os.path.commonpath([str(base), str(target)]) != str(base):
+                raise ValueError(f"Refusing to extract path outside bundle temp dir: {member.filename}")
+        archive.extractall(destination)
+
+
+def atomic_write_text(path: Path, content: str, encoding: str = "utf-8"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", encoding=encoding, dir=str(path.parent), delete=False) as handle:
+        handle.write(content)
+        temp_name = handle.name
+    Path(temp_name).replace(path)
+
+
+def resolve_bundle_payload(source: Path):
+    if source.is_dir():
+        session_json = source / "session.json"
+        if not session_json.exists():
+            raise FileNotFoundError(f"Bundle directory missing session.json: {source}")
+        return json.loads(session_json.read_text(encoding="utf-8")), None
+    if source.suffix.lower() == ".zip":
+        temp_dir = Path(tempfile.mkdtemp(prefix="claude-bundle-import-", dir="/tmp"))
+        safe_extract_zip(source, temp_dir)
+        session_json = temp_dir / "session.json"
+        if not session_json.exists():
+            raise FileNotFoundError(f"Bundle zip missing session.json: {source}")
+        return json.loads(session_json.read_text(encoding="utf-8")), temp_dir
+    return json.loads(source.read_text(encoding="utf-8")), None
+
+
+def bundle_to_history_entries(bundle: dict, project: str, session_id: str):
+    entries = []
+    for entry in bundle.get("raw_entries", []):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") != "user" or entry.get("isMeta"):
+            continue
+        text = extract_user_prompt(entry)
+        if not text:
+            continue
+        entries.append(
+            {
+                "display": text,
+                "pastedContents": {},
+                "timestamp": parse_timestamp_ms(entry.get("timestamp")) or 0,
+                "project": project,
+                "sessionId": session_id,
+            }
+        )
+    return entries
+
+
+def rewritten_raw_entries(bundle: dict, session_id: str, cwd: str):
+    out = []
+    for raw in bundle.get("raw_entries", []):
+        if not isinstance(raw, dict):
+            continue
+        entry = json.loads(json.dumps(raw))
+        entry["sessionId"] = session_id
+        if "cwd" in entry or entry.get("type") in {"user", "assistant", "attachment"}:
+            entry["cwd"] = cwd
+        out.append(entry)
+    return out
+
+
+def import_bundle(source_path: str, claude_dir: Path, *, force: bool = False, session_id_override: str = "", cwd_override: str = "", dry_run: bool = False):
+    source = Path(source_path).expanduser()
+    bundle, temp_dir = resolve_bundle_payload(source)
+    try:
+        if bundle.get("tool") != "claude":
+            raise ValueError("Bundle is not a Claude export.")
+        session = bundle.get("session", {})
+        session_id = session_id_override or str(session.get("session_id") or "")
+        if not session_id:
+            raise ValueError("Bundle is missing session.session_id.")
+        uuid.UUID(session_id)
+        project = cwd_override or str(session.get("cwd") or session.get("project") or "")
+        if not project:
+            raise ValueError("Bundle is missing session working directory/project.")
+        project = str(Path(project).expanduser())
+        if not os.path.isabs(project):
+            raise ValueError("Imported project path must be absolute. Use --import-cwd with an absolute path.")
+        transcript_entries = rewritten_raw_entries(bundle, session_id, project)
+        if not transcript_entries:
+            raise ValueError("Bundle does not contain raw Claude transcript entries.")
+
+        projects_dir = claude_dir / "projects" / encode_project_path(project)
+        transcript_path = projects_dir / f"{session_id}.jsonl"
+        history_path = claude_dir / "history.jsonl"
+        history_entries = bundle_to_history_entries(bundle, project, session_id)
+        writes = [str(transcript_path), str(history_path)]
+
+        if transcript_path.exists() and not force:
+            raise FileExistsError(f"Transcript already exists: {transcript_path}")
+
+        if dry_run:
+            print(json.dumps({
+                "session_id": session_id,
+                "project": project,
+                "transcript_path": str(transcript_path),
+                "history_entries": len(history_entries),
+                "would_write": writes,
+                "warning": "Import dry run only. No files were modified."
+            }, indent=2))
+            return
+
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        projects_dir.mkdir(parents=True, exist_ok=True)
+        (projects_dir / "memory").mkdir(parents=True, exist_ok=True)
+
+        atomic_write_text(
+            transcript_path,
+            "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in transcript_entries),
+            encoding="utf-8"
+        )
+
+        existing = []
+        if history_path.exists():
+            existing = [entry for entry in read_jsonl(history_path) if entry.get("sessionId") != session_id]
+        existing.extend(history_entries)
+        existing.sort(key=lambda item: int(item.get("timestamp") or 0))
+        atomic_write_text(
+            history_path,
+            "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in existing),
+            encoding="utf-8"
+        )
+        print(json.dumps({
+            "session_id": session_id,
+            "project": project,
+            "transcript_path": str(transcript_path),
+            "history_entries": len(history_entries),
+            "wrote": writes,
+        }, indent=2))
+    finally:
+        if temp_dir and temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Import a Claude session bundle.")
+    parser.add_argument("--bundle", default="./session.json", help="Path to session.json, bundle directory, or package.zip")
+    parser.add_argument("--claude-dir", default=str(Path.home() / ".claude"), help="Destination Claude state directory")
+    parser.add_argument("--import-force", action="store_true", help="Overwrite existing imported session data")
+    parser.add_argument("--import-session-id", default="", help="Override the imported session ID")
+    parser.add_argument("--import-cwd", default="", help="Override the imported working directory")
+    parser.add_argument("--import-dry-run", action="store_true", help="Validate the bundle and print the files that would be written")
+    args = parser.parse_args()
+    import_bundle(
+        args.bundle,
+        Path(args.claude_dir).expanduser(),
+        force=args.import_force,
+        session_id_override=args.import_session_id,
+        cwd_override=args.import_cwd,
+        dry_run=args.import_dry_run,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+    )
 
 
 def render_markdown(bundle: dict) -> str:
@@ -827,6 +1211,9 @@ def render_bundle_index(bundle: dict) -> str:
             <div class="toolbar-actions">
               <a class="btn primary" href="./package.zip" download>Download package zip</a>
               <a class="btn" href="./session.json" download>Download JSON</a>
+              <a class="btn" href="./transcript.jsonl" download>Download transcript</a>
+              <a class="btn" href="./README.md" download>Download README</a>
+              {importer_link}
             </div>
           </div>
           <div id="overview" class="stats"></div>
@@ -1146,7 +1533,12 @@ def render_bundle_index(bundle: dict) -> str:
   </script>
 </body>
 </html>
-""".format(title=title)
+""".format(
+        title=title,
+        importer_link='<a class="btn" href="./import_claude_bundle.py" download>Download importer</a>'
+        if bundle.get("tool") == "claude"
+        else "",
+    )
 
 
 def find_free_port() -> int:
