@@ -36,6 +36,7 @@ from export_utils import (
 
 
 DEFAULT_CLAUDE_DIR = Path.home() / ".claude"
+TEMP_ROOT = Path(tempfile.gettempdir())
 
 
 @dataclass
@@ -472,7 +473,7 @@ def resolve_bundle_payload(source: Path) -> tuple[dict, Path | None]:
         return json.loads(session_json.read_text(encoding="utf-8")), None
 
     if source.suffix.lower() == ".zip":
-        temp_dir = Path(tempfile.mkdtemp(prefix="claude-bundle-import-", dir="/tmp"))
+        temp_dir = Path(tempfile.mkdtemp(prefix="claude-bundle-import-", dir=str(TEMP_ROOT)))
         safe_extract_zip(source, temp_dir)
         session_json = temp_dir / "session.json"
         if not session_json.exists():
@@ -564,6 +565,11 @@ def import_claude_bundle(
         project = str(Path(project).expanduser())
         if not os.path.isabs(project):
             raise ValueError("Imported project path must be absolute. Use --import-cwd with an absolute path.")
+        if not cwd_override and not Path(project).exists():
+            raise ValueError(
+                "Imported project path does not exist on this host. "
+                "Use --import-cwd to rewrite the session to a local destination path."
+            )
 
         transcript_entries = rewritten_raw_entries(bundle, session_id, project)
         if not transcript_entries:

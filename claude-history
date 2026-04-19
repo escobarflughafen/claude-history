@@ -16,6 +16,15 @@ if [[ ! -f "$VIEWER" ]]; then
   exit 1
 fi
 
+if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+PY
+then
+  echo "claude-history requires Python 3.10+ (current: $("$PYTHON_BIN" -V 2>&1))." >&2
+  exit 1
+fi
+
 for arg in "$@"; do
   if [[ "$arg" == "--export" || "$arg" == --export=* || "$arg" == "--active-shares" || "$arg" == "--import-bundle" || "$arg" == --import-bundle=* || "$arg" == "--import-force" || "$arg" == "--import-session-id" || "$arg" == --import-session-id=* || "$arg" == "--import-cwd" || "$arg" == --import-cwd=* || "$arg" == "--import-dry-run" ]]; then
     exec "$PYTHON_BIN" "$VIEWER" "$@"
