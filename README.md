@@ -7,6 +7,30 @@ Local history viewers, export tools, web-share bundles, and migration helpers fo
 
 This repo adds interactive TUI history browsers for Claude Code and Codex, export and web-share workflows, and Claude session bundle migration tooling for moving resumable sessions across machines.
 
+## Quick Start
+
+Run directly from the repo:
+
+```bash
+./claude-history
+./codex-history
+```
+
+Install for all users:
+
+```bash
+sudo ./deploy-claude-history.sh
+```
+
+After installation:
+
+```bash
+claude-history
+codex-history
+```
+
+If you want public temporary sharing from the TUI, install `cloudflared` first.
+
 ## What This Repo Provides
 
 - Arrow-key TUI history viewer for Claude Code sessions
@@ -27,6 +51,16 @@ This repo adds interactive TUI history browsers for Claude Code and Codex, expor
   - `import_claude_bundle.py`
   - `index.html`
   - `package.zip`
+
+## Supported Workflows
+
+- inspect local Claude and Codex session history in a terminal UI
+- export a selected conversation as JSON, Markdown, or HTML
+- package a session as a portable web bundle
+- serve a bundle locally for browser-based review
+- open a temporary public URL for a selected bundle through Cloudflare Tunnel
+- inspect and stop active shares from the TUI
+- migrate Claude session bundles onto another host for `claude --resume`
 
 ## Platform Support
 
@@ -63,16 +97,20 @@ Deployment-time checks now also report whether these CLIs are present in `PATH`:
 
 The deploy script does not require `claude` or `codex` to be installed, because some machines may only need one viewer, but it will warn clearly when either runtime command is missing.
 
+## Capability Matrix
+
+| Capability | Claude | Codex |
+| --- | --- | --- |
+| TUI history browsing | Yes | Yes |
+| Resume command selection | Yes | Yes |
+| Start-mode selection | No | Yes |
+| JSON / Markdown / HTML export | Yes | Yes |
+| Web bundle export | Yes | Yes |
+| Local serve / Cloudflare tunnel | Yes | Yes |
+| Active share inspection in TUI | Yes | Yes |
+| Session migration bundle import | Yes | No |
+
 ## Install
-
-### Quick Local Use
-
-Run the wrappers directly from the repo:
-
-```bash
-./claude-history
-./codex-history
-```
 
 ### System Install For All Users
 
@@ -138,6 +176,18 @@ Default Linux install locations:
   - `/opt/claude-history`
 - launcher commands:
   - `/usr/local/bin`
+
+## Common Commands
+
+```bash
+claude-history
+codex-history
+claude-history --active-shares
+codex-history --active-shares
+claude-history --export md --session-id <id>
+codex-history --export html --session-id <id>
+claude-history --import-bundle /path/to/package.zip --import-cwd /absolute/path/to/project
+```
 
 ## Out-Of-The-Box Usage Manual
 
@@ -290,6 +340,13 @@ Important:
 - Claude resume is project-directory scoped in practice
 - if the imported original path does not exist on the destination host, use `--import-cwd`
 - Claude must already be installed and authenticated on the destination host
+
+## Current Limitations
+
+- Claude resume portability is not automatic across hosts; the session path and project cwd still matter
+- Codex sessions can be viewed and exported here, but there is no Codex session-import equivalent in this repo
+- tunnel mode depends on a working external `cloudflared` binary and network access
+- exported bundles are intentionally portable, which means they can contain sensitive transcript data
 
 ## macOS-Specific Behavior
 
