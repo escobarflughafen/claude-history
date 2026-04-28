@@ -189,6 +189,84 @@ codex-history --export html --session-id <id>
 claude-history --import-bundle /path/to/package.zip --import-cwd /absolute/path/to/project
 ```
 
+## Transfer Service
+
+For an internal browser-first transfer flow, this repo now includes a unified service:
+
+```bash
+./transfer-service --tunnel
+```
+
+What it does:
+
+- starts a localhost HTTP app
+- optionally exposes it through a temporary Cloudflare tunnel
+- generates a one-time tokenized URL
+- shows a one-liner the source user can run in `bash`
+- downloads a temporary helper to the source machine
+- lets that source user pick a local Claude or Codex session in the terminal
+- uploads the selected session bundle back to the service
+- updates the web UI with a preview
+- optionally accepts file or directory uploads from the browser
+- checks whether the uploaded session ID already exists on the destination host
+- lets the operator choose whether to overwrite that destination session or create a new session ID
+- proposes a safe destination workspace path under the host user's home directory and lets the operator change it
+- prepares a staged workspace on the server and bundle extraction area
+
+High-level operator flow:
+
+1. Start `./transfer-service --tunnel` on the receiving host.
+2. Open the printed URL in a browser.
+3. Copy the one-liner from the page and run it on the source machine.
+4. Pick the session to upload in the helper terminal prompt.
+5. Review the uploaded session in the browser.
+6. Optionally upload files or a folder from the browser.
+7. If the destination host already has the same session ID, choose `overwrite` or `create a new session ID`.
+8. Review the proposed destination workspace path under the host user's home directory and change it if needed.
+9. Click `Prepare In Background`.
+8. Click `Close Session` when done.
+
+Notes:
+
+- the one-liner requires `python3` and `curl` on the source machine
+- the helper reads the session-selection prompt from `/dev/tty`, so the `curl ... | bash` flow works in interactive Linux and macOS shells
+- uploaded bundles and staged files are stored under a temporary server session directory
+- destination workspace paths must stay inside the receiving host user's home directory
+- `Prepare In Background` currently stages the extracted bundle and synced files on the receiving host; it does not yet perform a full Codex import because this repo still has no Codex session-import path
+
+### Transfer Service File Upload Support
+
+Current browser upload behavior:
+
+- multiple files are supported
+- whole-directory upload is supported when the browser exposes relative paths
+- relative paths are preserved into the staged workspace
+- per-file limit: `50 MB`
+- total request limit: `250 MB`
+
+Accepted file categories:
+
+- source code and scripts:
+  - `.py`, `.js`, `.ts`, `.tsx`, `.go`, `.rs`, `.java`, `.php`, `.rb`, `.swift`, `.kt`, `.c`, `.cc`, `.cpp`, `.h`, `.hpp`, `.m`, `.lua`, `.sh`, `.vue`
+- web and styling:
+  - `.html`, `.css`, `.scss`, `.svg`
+- config and structured data:
+  - `.json`, `.jsonl`, `.yaml`, `.yml`, `.toml`, `.ini`, `.xml`, `.sql`, `.csv`
+- docs and text:
+  - `.md`, `.txt`, `.log`, `.patch`, `.pdf`
+- images:
+  - `.png`, `.jpg`, `.jpeg`, `.svg`
+- common project filenames:
+  - `Dockerfile`, `Makefile`, `Gemfile`, `requirements.txt`, `.env`, `.env.example`, `.gitignore`, `.npmrc`, `.prettierrc`, `.tool-versions`
+
+Files outside that allowlist are rejected by the service and shown in the UI as rejected uploads.
+
+### Transfer Service macOS Notes
+
+- the helper path works on macOS as long as `python3` and `curl` are available
+- for folder upload from the browser, Chromium-based browsers are the most reliable option
+- Safari may be less consistent for directory upload because browser support for relative-path directory selection is weaker
+
 ## Out-Of-The-Box Usage Manual
 
 ### Claude History Viewer

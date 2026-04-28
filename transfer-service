@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER="${TRANSFER_SERVICE_PY:-$SCRIPT_DIR/transfer_service.py}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+if [[ ! -f "$SERVER" ]]; then
+  echo "Transfer service script not found: $SERVER" >&2
+  exit 1
+fi
+
+if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 10) else 1)
+PY
+then
+  echo "transfer-service requires Python 3.10+ (current: $("$PYTHON_BIN" -V 2>&1))." >&2
+  exit 1
+fi
+
+exec "$PYTHON_BIN" "$SERVER" "$@"
