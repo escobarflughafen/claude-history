@@ -224,7 +224,7 @@ High-level operator flow:
 7. If the destination host already has the same session ID, choose `overwrite` or `create a new session ID`.
 8. Review the proposed destination workspace path under the host user's home directory and change it if needed.
 9. Click `Prepare In Background`.
-8. Click `Close Session` when done.
+10. Click `Close Session` when done.
 
 Notes:
 
@@ -482,15 +482,18 @@ These tools handle real session transcripts. Treat exports and bundles as sensit
 
 ## Repo Layout
 
-- [claude_history_viewer.py](/home/aoi/Workspaces/claude-history/claude_history_viewer.py)
-- [codex_history_viewer.py](/home/aoi/Workspaces/claude-history/codex_history_viewer.py)
-- [export_utils.py](/home/aoi/Workspaces/claude-history/export_utils.py)
-- [claude-history](/home/aoi/Workspaces/claude-history/claude-history)
-- [codex-history](/home/aoi/Workspaces/claude-history/codex-history)
-- [deploy-claude-history.sh](/home/aoi/Workspaces/claude-history/deploy-claude-history.sh)
+- `claude_history_viewer.py`
+- `codex_history_viewer.py`
+- `export_utils.py`
+- `claude-history`
+- `codex-history`
+- `deploy-claude-history.sh`
+- `transfer_service.py`
+- `transfer_client_helper.py`
+- `transfer-service`
 
 ## Related Notes
 
-- [CLAUDE_RESUME_OBSERVATIONS.md](/home/aoi/Workspaces/claude-history/CLAUDE_RESUME_OBSERVATIONS.md)
-- [TUNNEL_FAILSAFE_NOTES.md](/home/aoi/Workspaces/claude-history/TUNNEL_FAILSAFE_NOTES.md)
-- [RELEASE_NOTES_2026-04-18.md](/home/aoi/Workspaces/claude-history/RELEASE_NOTES_2026-04-18.md)
+- `CLAUDE_RESUME_OBSERVATIONS.md`
+- `TUNNEL_FAILSAFE_NOTES.md`
+- `RELEASE_NOTES_2026-04-18.md`
