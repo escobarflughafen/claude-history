@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Proxy POC</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>
+:root{
+  --bg:#0d1113;--panel:#11181b;--panel-2:#172024;--line:#253136;--ink:#dde6e8;--mut:#92a3a8;
+  --acc:#5a98bd;--acc-soft:#1b2a32;--soft:#141d20;--shadow:none;
+}
+body.theme-light{
+  --bg:#f5f5f1;--panel:#fcfcf9;--panel-2:#ffffff;--line:#e1e3dc;--ink:#213038;--mut:#66757b;
+  --acc:#2f6f98;--acc-soft:#e8f1f6;--soft:#eef1ee;--shadow:0 1px 2px rgba(20,25,30,0.04);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font:15px/1.35 "Helvetica Neue",Helvetica,"Segoe UI",Arial,sans-serif;
+  background:var(--bg);
+  color:var(--ink);
+}
+button,input,select,textarea{font:inherit}
+button,input,select,textarea{
+  background:var(--panel-2);
+  color:var(--ink);
+  border:1px solid var(--line);
+  border-radius:8px;
+}
+button{
+  padding:8px 12px;
+  background:var(--acc);
+  color:#fff;
+  border-color:transparent;
+  font-weight:700;
+  cursor:pointer;
+}
+button.alt{
+  background:var(--soft);
+  color:var(--ink);
+  border-color:var(--line);
+}
+input,select,textarea{padding:8px 10px}
+.app{
+  display:grid;
+  grid-template-rows:auto auto minmax(0,1fr);
+  min-height:100vh;
+}
+.topbar{
+  border-bottom:1px solid var(--line);
+  background:var(--panel);
+  padding:8px 10px;
+  display:grid;
+  gap:8px;
+}
+.brandline{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+}
+.brand h1{
+  margin:0;
+  font-size:16px;
+}
+.brand .sub{
+  color:var(--mut);
+  font-size:12px;
+}
+.statusline{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+}
+.statusline .path{
+  color:var(--mut);
+  font-size:12px;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.controls{
+  display:block;
+}
+.controls > summary{
+  display:none;
+}
+.control-grid{
+  display:grid;
+  grid-template-columns:minmax(150px,1.2fr) minmax(110px,.8fr) minmax(110px,.8fr) minmax(110px,.8fr) minmax(140px,1fr) minmax(160px,1.2fr) auto auto auto;
+  gap:6px;
+  align-items:center;
+}
+.control-grid > *{min-width:0}
+.tabs{
+  display:flex;
+  gap:6px;
+  padding:6px 10px 0;
+  background:var(--panel);
+}
+.tabs button{
+  background:transparent;
+  color:var(--mut);
+  border:1px solid var(--line);
+  border-bottom-color:transparent;
+  border-radius:10px 10px 0 0;
+  padding:7px 12px;
+}
+.tabs button.active{
+  background:var(--panel-2);
+  color:var(--ink);
+}
+.main{
+  min-height:0;
+  background:var(--panel-2);
+}
+.view{
+  display:none;
+  height:100%;
+}
+.view.active{
+  display:block;
+}
+.console-view{
+  height:100%;
+  padding:6px 10px 10px;
+}
+.terminal-shell{
+  height:100%;
+  min-height:0;
+  border:1px solid var(--line);
+  border-radius:12px;
+  background:var(--panel);
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
+  box-shadow:var(--shadow);
+}
+.terminal-meta{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  padding:6px 8px;
+  border-bottom:1px solid var(--line);
+  font-size:12px;
+  color:var(--mut);
+}
+.terminal-meta strong{color:var(--ink)}
+#terminal{
+  flex:1 1 auto;
+  min-height:calc(100vh - 138px);
+  padding:2px;
+}
+.files-view{
+  height:100%;
+  padding:8px 10px 10px;
+}
+.files-layout{
+  height:100%;
+  min-height:0;
+  display:grid;
+  grid-template-columns:minmax(240px,320px) minmax(0,1fr);
+  gap:8px;
+}
+.card{
+  height:100%;
+  min-height:0;
+  background:var(--panel);
+  border:1px solid var(--line);
+  border-radius:12px;
+  display:grid;
+  grid-template-rows:auto auto minmax(0,1fr);
+  box-shadow:var(--shadow);
+}
+.card-head{
+  padding:8px 10px 6px;
+  border-bottom:1px solid var(--line);
+}
+.card-head h2{
+  margin:0;
+  font-size:13px;
+}
+.card-tools{
+  padding:8px 10px;
+  display:grid;
+  gap:8px;
+}
+.tree{
+  overflow:auto;
+  padding:0 10px 10px;
+  display:grid;
+  gap:2px;
+}
+.node{font-size:13px;padding:2px 0}
+.node.dir{font-weight:700}
+.children{margin-left:14px}
+pre{
+  margin:0;
+  overflow:auto;
+  white-space:pre-wrap;
+  word-break:break-word;
+  font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+  padding:10px;
+  color:var(--ink);
+}
+.pill{
+  display:inline-flex;
+  align-items:center;
+  border:1px solid var(--line);
+  border-radius:999px;
+  padding:3px 8px;
+  background:var(--panel-2);
+  color:var(--mut);
+  font-size:12px;
+}
+.pill.live{color:#2f9b62}
+.pill.starting,.pill.connected{color:#d39a56}
+.pill.error{color:#d86d6d}
+.pill.stopped,.pill.pending,.pill.disconnected{color:var(--mut)}
+.mobile-only{display:none}
+@media (max-width:900px){
+  .controls > summary{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    list-style:none;
+    padding:8px 10px;
+    background:var(--soft);
+    border:1px solid var(--line);
+    border-radius:8px;
+    color:var(--ink);
+    cursor:pointer;
+  }
+  .controls > summary::-webkit-details-marker{display:none}
+  .control-grid{display:none}
+  .controls[open] .control-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr 1fr;
+    margin-top:8px;
+  }
+  .mobile-span-2{grid-column:span 2}
+  .mobile-span-3{grid-column:span 3}
+  .brandline{align-items:flex-start;flex-direction:column}
+  .tabs{padding-top:4px}
+  #terminal{min-height:calc(100vh - 240px)}
+  .files-layout{
+    grid-template-columns:1fr;
+    grid-template-rows:minmax(220px,36vh) minmax(0,1fr);
+  }
+  .mobile-only{display:block}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brandline">
+      <div class="brand">
+        <h1>Agent Proxy POC</h1>
+        <div class="sub">Dark by default. Terminal first.</div>
+      </div>
+      <div class="statusline">
+        <span id="tty-status" class="pill">pending</span>
+        <strong id="tty-title">No terminal attached</strong>
+        <span id="session-path" class="path"></span>
+      </div>
+    </div>
+    <details id="controls-menu" class="controls" open>
+      <summary>Controls</summary>
+      <div class="control-grid">
+        <select id="quick-session">
+          <option value="">Select session</option>
+        </select>
+        <select id="launch-mode">
+          <option value="shell">Shell</option>
+          <option value="claude">Claude</option>
+          <option value="codex">Codex</option>
+        </select>
+        <select id="theme-mode">
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+        </select>
+        <select id="new-tool">
+          <option value="claude">Claude</option>
+          <option value="codex">Codex</option>
+        </select>
+        <input id="new-title" placeholder="New session title">
+        <input id="new-workspace" placeholder="Workspace path (optional)">
+        <button id="open-btn" onclick="startSelectedTty()">Open</button>
+        <button class="alt" onclick="stopTty()">Stop</button>
+        <button class="alt" onclick="createSession()">Create</button>
+      </div>
+    </details>
+  </header>
+
+  <nav class="tabs">
+    <button id="tab-console" class="active" onclick="setTab('console')">Console</button>
+    <button id="tab-files" onclick="setTab('files')">Files</button>
+  </nav>
+
+  <main class="main">
+    <section id="view-console" class="view console-view active">
+      <div class="terminal-shell">
+        <div class="terminal-meta">
+          <span id="session-title">No session selected</span>
+          <span class="mobile-only">Use Controls to switch sessions</span>
+        </div>
+        <div id="terminal"></div>
+      </div>
+    </section>
+
+    <section id="view-files" class="view files-view">
+      <div class="files-layout">
+        <section class="card">
+          <div class="card-head"><h2>File Explorer</h2></div>
+          <div class="card-tools">
+            <select id="file-session" onchange="syncSessionFromFiles(this.value)"></select>
+          </div>
+          <div id="tree" class="tree"></div>
+        </section>
+        <section class="card">
+          <div class="card-head"><h2>Preview</h2></div>
+          <div class="card-tools">
+            <input id="path" placeholder="Relative file path">
+            <button class="alt" onclick="readFile()">Open File</button>
+          </div>
+          <pre id="file-content">Select a session and file path.</pre>
+        </section>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script>
+let currentId = "";
+let activeTab = "console";
+let uiTheme = "dark";
+let term = null;
+let termLoadFailed = false;
+let fitAddon = null;
+let resizeObserver = null;
+let ttySocket = null;
+let ttySocketSession = "";
+let ttyResizeTimer = null;
+
+function esc(s){return String(s ?? "");}
+
+async function api(path, options={}){
+  const res = await fetch(path, options);
+  const data = await res.json();
+  if(!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function ensureTerminal(){
+  if(term) return;
+  if(typeof window.Terminal === "undefined" || !window.FitAddon || !window.FitAddon.FitAddon){
+    if(!termLoadFailed){
+      termLoadFailed = true;
+      document.getElementById("tty-title").textContent = "Terminal library failed to load";
+      setTtyStatus("error", false);
+      document.getElementById("terminal").textContent = "xterm.js or its fit addon did not load.";
+    }
+    return;
+  }
+  term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+    theme: { background: "#0d1113", foreground: "#dde6e8" },
+    scrollback: 3000,
+    convertEol: true,
+  });
+  fitAddon = new window.FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(document.getElementById("terminal"));
+  fitTerminal(true);
+  term.writeln("Create or select a session, then open Shell, Claude, or Codex.");
+  term.onData((data) => {
+    if(!ttySocket || ttySocket.readyState !== WebSocket.OPEN) return;
+    ttySocket.send(JSON.stringify({type:"input", data}));
+  });
+  term.onResize(({cols, rows}) => {
+    if(cols < 2 || rows < 2) return;
+    if(!ttySocket || ttySocket.readyState !== WebSocket.OPEN) return;
+    if(ttyResizeTimer) clearTimeout(ttyResizeTimer);
+    ttyResizeTimer = setTimeout(() => {
+      if(ttySocket && ttySocket.readyState === WebSocket.OPEN){
+        ttySocket.send(JSON.stringify({type:"resize", cols, rows}));
+      }
+    }, 30);
+  });
+  if(!resizeObserver){
+    resizeObserver = new ResizeObserver(() => fitTerminal());
+    resizeObserver.observe(document.getElementById("terminal"));
+    resizeObserver.observe(document.querySelector(".main"));
+  }
+}
+
+function fitTerminal(force=false){
+  if(!term || !fitAddon) return;
+  fitAddon.fit();
+  if(force && ttySocket && ttySocket.readyState === WebSocket.OPEN && term.cols > 1 && term.rows > 1){
+    ttySocket.send(JSON.stringify({type:"resize", cols: term.cols, rows: term.rows}));
+  }
+}
+
+function setTheme(theme){
+  uiTheme = theme === "light" ? "light" : "dark";
+  document.body.classList.toggle("theme-light", uiTheme === "light");
+  document.getElementById("theme-mode").value = uiTheme;
+  if(term){
+    term.options.theme = uiTheme === "light"
+      ? { background: "#f5f5f1", foreground: "#213038" }
+      : { background: "#0d1113", foreground: "#dde6e8" };
+    setTimeout(() => fitTerminal(true), 10);
+  }
+}
+
+function setTab(tab){
+  activeTab = tab === "files" ? "files" : "console";
+  document.getElementById("tab-console").classList.toggle("active", activeTab === "console");
+  document.getElementById("tab-files").classList.toggle("active", activeTab === "files");
+  document.getElementById("view-console").classList.toggle("active", activeTab === "console");
+  document.getElementById("view-files").classList.toggle("active", activeTab === "files");
+  setTimeout(() => fitTerminal(true), 30);
+}
+
+function setTtyStatus(label, live=false){
+  const el = document.getElementById("tty-status");
+  el.textContent = label;
+  el.className = `pill ${live ? "live" : ""} ${label}`.trim();
+}
+
+function setTtyTitle(label){
+  document.getElementById("tty-title").textContent = label || "No terminal attached";
+}
+
+function disconnectTtySocket(){
+  if(ttySocket){
+    ttySocket.onopen = null;
+    ttySocket.onmessage = null;
+    ttySocket.onclose = null;
+    ttySocket.onerror = null;
+    try{ ttySocket.close(); }catch(err){}
+  }
+  ttySocket = null;
+  ttySocketSession = "";
+}
+
+function handleTtyMessage(message){
+  ensureTerminal();
+  if(!term) return;
+  if(message.type === "output"){
+    term.write(message.data || "");
+    return;
+  }
+  if(message.type === "status"){
+    setTtyTitle(message.title ? `Terminal: ${message.title}` : "No terminal attached");
+    const state = message.state || (message.alive ? "live" : "stopped");
+    setTtyStatus(state, !!message.alive);
+    return;
+  }
+  if(message.type === "error"){
+    setTtyStatus("error", false);
+    if(message.message){
+      term.writeln(`\r\n[${message.message}]`);
+    }
+  }
+}
+
+function connectTtySocket(){
+  if(!currentId) return;
+  if(ttySocket && ttySocketSession === currentId &&
+    (ttySocket.readyState === WebSocket.OPEN || ttySocket.readyState === WebSocket.CONNECTING)){
+    return;
+  }
+  disconnectTtySocket();
+  ensureTerminal();
+  if(!term) return;
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  ttySocketSession = currentId;
+  ttySocket = new WebSocket(`${protocol}://${window.location.host}/api/sessions/${currentId}/tty/ws`);
+  ttySocket.onopen = () => {
+    setTtyStatus("connected", false);
+    fitTerminal(true);
+  };
+  ttySocket.onmessage = (event) => {
+    try{
+      handleTtyMessage(JSON.parse(event.data));
+    }catch(err){
+      console.error("Invalid tty message", err);
+    }
+  };
+  ttySocket.onclose = () => {
+    if(currentId === ttySocketSession){
+      setTtyStatus("disconnected", false);
+    }
+  };
+  ttySocket.onerror = () => {
+    setTtyStatus("error", false);
+  };
+}
+
+function renderTree(nodes){
+  const wrap = document.getElementById("tree");
+  wrap.innerHTML = "";
+  const build = (node, prefix="") => {
+    const path = prefix ? `${prefix}/${node.name}` : node.name;
+    const outer = document.createElement("div");
+    const line = document.createElement("div");
+    line.className = `node ${node.type}`;
+    line.textContent = node.name;
+    if(node.type === "file"){
+      line.style.cursor = "pointer";
+      line.onclick = () => {
+        document.getElementById("path").value = path;
+        readFile();
+      };
+    }
+    outer.appendChild(line);
+    if(node.children && node.children.length){
+      const child = document.createElement("div");
+      child.className = "children";
+      node.children.forEach(item => child.appendChild(build(item, path)));
+      outer.appendChild(child);
+    }
+    return outer;
+  };
+  if(!nodes.length){wrap.textContent = "Workspace is empty."; return;}
+  nodes.forEach(node => wrap.appendChild(build(node)));
+}
+
+function renderSession(data){
+  currentId = data.id;
+  document.getElementById("session-title").textContent = data.title;
+  document.getElementById("session-path").textContent = data.workspace_dir;
+  ensureTerminal();
+  if(term) term.clear();
+  if(data.tty){
+    setTtyTitle(data.tty.title ? `Terminal: ${data.tty.title}` : "No terminal attached");
+    setTtyStatus(data.tty.state || (data.tty.active ? "live" : "pending"), !!data.tty.active);
+  }else{
+    setTtyTitle("No terminal attached");
+    setTtyStatus("pending", false);
+  }
+  renderTree(data.files || []);
+}
+
+async function loadSessions(){
+  const data = await api("/api/sessions");
+  const controls = ["quick-session", "file-session"];
+  controls.forEach((id) => {
+    const el = document.getElementById(id);
+    if(!el) return;
+    el.innerHTML = "";
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = data.sessions.length ? "Select session" : "No sessions yet";
+    el.appendChild(blank);
+    data.sessions.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = item.title;
+      option.selected = item.id === currentId;
+      el.appendChild(option);
+    });
+  });
+}
+
+async function createSession(){
+  const data = await api("/api/sessions", {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({
+      tool: document.getElementById("new-tool").value,
+      title: document.getElementById("new-title").value.trim(),
+      workspace_dir: document.getElementById("new-workspace").value.trim(),
+    })
+  });
+  await loadSessions();
+  await loadSession(data.id);
+  document.getElementById("new-title").value = "";
+}
+
+async function loadSession(id){
+  if(!id) return;
+  if(currentId && currentId !== id){
+    disconnectTtySocket();
+  }
+  const data = await api(`/api/sessions/${id}`);
+  renderSession(data);
+  await loadSessions();
+  connectTtySocket();
+  fitTerminal(true);
+}
+
+function syncSessionFromFiles(id){
+  if(id) loadSession(id);
+}
+
+function startSelectedTty(){
+  const mode = document.getElementById("launch-mode").value || "shell";
+  startTty(mode);
+}
+
+async function startTty(mode){
+  if(!currentId) return;
+  ensureTerminal();
+  if(!term) return;
+  term.clear();
+  connectTtySocket();
+  fitTerminal(true);
+  setTtyTitle(`Terminal: ${mode}`);
+  setTtyStatus("starting", false);
+  await api(`/api/sessions/${currentId}/tty/start`, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({mode})
+  });
+}
+
+async function stopTty(){
+  if(!currentId) return;
+  await api(`/api/sessions/${currentId}/tty/stop`, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({})
+  });
+}
+
+async function readFile(){
+  if(!currentId) return;
+  const path = document.getElementById("path").value.trim();
+  if(!path) return;
+  const data = await api(`/api/sessions/${currentId}/files?path=${encodeURIComponent(path)}`);
+  document.getElementById("file-content").textContent = data.content;
+}
+
+document.getElementById("quick-session").addEventListener("change", (event) => {
+  if(event.target.value) loadSession(event.target.value);
+});
+document.getElementById("theme-mode").addEventListener("change", (event) => setTheme(event.target.value));
+
+function syncControlsLayout(){
+  const controls = document.getElementById("controls-menu");
+  if(!controls) return;
+  if(window.matchMedia("(max-width: 900px)").matches){
+    controls.removeAttribute("open");
+  }else{
+    controls.setAttribute("open", "open");
+  }
+}
+
+setTheme("dark");
+setTab("console");
+syncControlsLayout();
+window.addEventListener("resize", syncControlsLayout);
+loadSessions();
+</script>
+</body>
+</html>
