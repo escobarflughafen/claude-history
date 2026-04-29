@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVER="${AGENT_PROXY_POC_PY:-$SCRIPT_DIR/agent_proxy_poc.py}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+if [[ ! -f "$SERVER" ]]; then
+  echo "Proxy POC script not found: $SERVER" >&2
+  exit 1
+fi
+
+exec "$PYTHON_BIN" "$SERVER" "$@"

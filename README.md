@@ -189,6 +189,30 @@ codex-history --export html --session-id <id>
 claude-history --import-bundle /path/to/package.zip --import-cwd /absolute/path/to/project
 ```
 
+## Agent Proxy POC
+
+This repo also includes a minimal local web proxy proof-of-concept:
+
+```bash
+./agent-proxy-poc
+```
+
+What it provides:
+
+- local web UI with session list
+- chat-style prompt log
+- workspace file tree
+- file viewer
+- command execution panel
+- per-session local workspace
+
+Current scope:
+
+- this is a supervisor/UI POC, not a full Claude/Codex protocol bridge
+- prompts are recorded and surfaced in the UI, but real CLI streaming is not implemented yet
+- command execution runs locally in the selected session workspace
+- file browsing reads from the session workspace only
+
 ## Transfer Service
 
 For an internal browser-first transfer flow, this repo now includes a unified service:
