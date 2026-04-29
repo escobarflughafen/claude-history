@@ -32,6 +32,7 @@ POC_ROOT = Path(tempfile.gettempdir()) / "agent-proxy-poc"
 SESSIONS: dict[str, dict[str, Any]] = {}
 LOCK = threading.Lock()
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+TTY_FLUSH_INTERVAL = 0.02
 
 
 def now_iso() -> str:
@@ -65,6 +66,7 @@ def workspace_tree(root: Path) -> list[dict[str, Any]]:
 
 
 def session_snapshot(session: dict[str, Any]) -> dict[str, Any]:
+    tty = session.get("tty") or {}
     return {
         "id": session["id"],
         "tool": session["tool"],
@@ -75,9 +77,10 @@ def session_snapshot(session: dict[str, Any]) -> dict[str, Any]:
         "commands": session["commands"],
         "files": workspace_tree(session["workspace_dir"]),
         "tty": {
-            "active": bool(session.get("tty")),
+            "active": bool(tty.get("alive")),
             "title": session.get("tty_title", ""),
             "cursor": int(session.get("tty_seq", 0)),
+            "state": session.get("tty_state", "pending"),
         },
     }
 
@@ -88,7 +91,26 @@ def _append_tty_output(session: dict[str, Any], data: str) -> None:
     session["tty_seq"] = int(session.get("tty_seq", 0)) + 1
     session.setdefault("tty_chunks", []).append({"seq": session["tty_seq"], "data": data})
     session["tty_chunks"] = session["tty_chunks"][-2000:]
-    broadcast_tty_message(session, {"type": "output", "data": data, "cursor": session["tty_seq"]})
+    session.setdefault("tty_pending_output", []).append(data)
+    if not session.get("tty_flush_scheduled"):
+        session["tty_flush_scheduled"] = True
+        threading.Thread(target=_flush_tty_output, args=(session["id"],), daemon=True).start()
+
+
+def _flush_tty_output(session_id: str) -> None:
+    time.sleep(TTY_FLUSH_INTERVAL)
+    with LOCK:
+        session = SESSIONS.get(session_id)
+        if not session:
+            return
+        payload = "".join(session.pop("tty_pending_output", []))
+        session["tty_flush_scheduled"] = False
+    if payload:
+        with LOCK:
+            session = SESSIONS.get(session_id)
+            if not session:
+                return
+            broadcast_tty_message(session, {"type": "output", "data": payload, "cursor": session["tty_seq"]})
 
 
 def broadcast_tty_message(session: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -112,6 +134,7 @@ def broadcast_tty_status(session: dict[str, Any]) -> None:
             "alive": bool(tty.get("alive")),
             "title": session.get("tty_title", ""),
             "cursor": int(session.get("tty_seq", 0)),
+            "state": session.get("tty_state", "pending"),
         },
     )
 
@@ -149,6 +172,7 @@ def _tty_reader(session_id: str) -> None:
                 session = SESSIONS.get(session_id)
                 if session and session.get("tty"):
                     session["tty"]["alive"] = False
+                    session["tty_state"] = "stopped"
                     _append_tty_output(session, "\r\n[session ended]\r\n")
                     broadcast_tty_status(session)
             debug_log(f"tty eof for session={session_id} pid={pid} status={exit_status or 'unknown'}")
@@ -163,14 +187,22 @@ def _tty_reader(session_id: str) -> None:
 
 
 def start_tty_session(session: dict[str, Any], mode: str) -> None:
-    if session.get("tty") and session["tty"].get("alive"):
-        debug_log(f"tty start ignored for session={session['id']}: already alive")
-        return
+    current_tty = session.get("tty")
+    if current_tty and current_tty.get("alive"):
+        if session.get("tty_title") == mode:
+            session["tty_state"] = "live"
+            broadcast_tty_status(session)
+            debug_log(f"tty start ignored for session={session['id']}: already alive in mode={mode}")
+            return
+        stop_tty_session(session)
     shell_path = os.environ.get("SHELL", "/bin/bash")
     debug_log(
         f"tty start requested for session={session['id']} mode={mode} "
         f"workspace={session['workspace_dir']} shell={shell_path}"
     )
+    session["tty_state"] = "starting"
+    session["tty_title"] = mode
+    broadcast_tty_status(session)
     pid, master_fd = pty.fork()
     if pid == 0:
         os.chdir(session["workspace_dir"])
@@ -187,13 +219,42 @@ def start_tty_session(session: dict[str, Any], mode: str) -> None:
     fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
     session["tty"] = {"pid": pid, "master_fd": master_fd, "alive": True}
     session["tty_title"] = mode
+    session["tty_state"] = "live"
     session["tty_seq"] = 0
     session["tty_chunks"] = []
+    session["tty_pending_output"] = []
+    session["tty_flush_scheduled"] = False
     thread = threading.Thread(target=_tty_reader, args=(session["id"],), daemon=True)
     session["tty_thread"] = thread
     thread.start()
     broadcast_tty_status(session)
     debug_log(f"tty started for session={session['id']} pid={pid} mode={mode}")
+
+
+def stop_tty_session(session: dict[str, Any]) -> None:
+    tty = session.get("tty")
+    if not tty:
+        session["tty_state"] = "stopped"
+        broadcast_tty_status(session)
+        return
+    pid = tty.get("pid")
+    master_fd = tty.get("master_fd")
+    tty["alive"] = False
+    if master_fd is not None:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+    if pid:
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            pass
+    session["tty"] = None
+    session["tty_state"] = "stopped"
+    _append_tty_output(session, "\r\n[terminal stopped]\r\n")
+    broadcast_tty_status(session)
+    debug_log(f"tty stopped for session={session['id']} pid={pid}")
 
 
 def tty_resize(session: dict[str, Any], cols: int, rows: int) -> None:
@@ -218,6 +279,8 @@ def tty_write(session: dict[str, Any], data: str) -> None:
         os.write(tty["master_fd"], data.encode("utf-8", errors="replace"))
     except OSError:
         tty["alive"] = False
+        session["tty_state"] = "error"
+        broadcast_tty_status(session)
         debug_log(f"tty input write failed for session={session['id']}")
 
 
@@ -229,6 +292,7 @@ def tty_poll(session: dict[str, Any], cursor: int) -> dict[str, Any]:
         "chunks": chunks,
         "alive": bool(tty.get("alive")),
         "title": session.get("tty_title", ""),
+        "state": session.get("tty_state", "pending"),
     }
 
 
@@ -310,6 +374,8 @@ def create_session(tool: str, title: str, workspace_dir: str = "") -> dict[str, 
             }
         ],
         "commands": [],
+        "tty_state": "pending",
+        "tty_clients": set(),
     }
     with LOCK:
         SESSIONS[session_id] = session
@@ -325,59 +391,108 @@ HTML = """<!DOCTYPE html>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <style>
 :root{
-  --bg:#f8f8f6;--panel:#ffffff;--line:#e5e5df;--ink:#243238;--mut:#6e7c80;
-  --acc:#2f6f98;--warn:#a56b3f;--soft:#f1f3f1;
+  --bg:#f5f5f1;--panel:#fcfcf9;--panel-2:#ffffff;--line:#e1e3dc;--ink:#213038;--mut:#66757b;
+  --acc:#2f6f98;--acc-soft:#e8f1f6;--warn:#9b673e;--soft:#eef1ee;--shadow:0 1px 2px rgba(20,25,30,0.04);
+}
+body.theme-dark{
+  --bg:#101516;--panel:#12191b;--panel-2:#182124;--line:#263135;--ink:#dde7e9;--mut:#95a6ab;
+  --acc:#5e98bc;--acc-soft:#1d2c35;--warn:#c28a57;--soft:#162022;--shadow:none;
 }
 *{box-sizing:border-box}
-body{margin:0;font:16px/1.4 "Helvetica Neue",Helvetica,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--ink)}
+body{margin:0;font:16px/1.35 "Helvetica Neue",Helvetica,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--ink)}
 .app{display:grid;grid-template-columns:280px minmax(0,1fr) 400px;min-height:100vh}
+.mode-min .app{grid-template-columns:320px minmax(0,1fr)}
 .pane{border-right:1px solid var(--line);background:var(--panel)}
 .pane:last-child{border-right:0}
-.head{padding:14px 16px;border-bottom:1px solid var(--line);background:#fcfcfa}
-.body{padding:14px 16px}
+.head{padding:10px 12px;border-bottom:1px solid var(--line);background:var(--panel)}
+.body{padding:10px 12px}
 h1,h2,h3{margin:0;color:var(--ink)}
-h1{font-size:20px}
-h2{font-size:15px}
+h1{font-size:18px}
+h2{font-size:14px}
 .mut{color:var(--mut)}
-.card{border:1px solid var(--line);border-radius:12px;background:#fff;padding:12px}
-.stack{display:grid;gap:12px}
+.card{border:1px solid var(--line);border-radius:10px;background:var(--panel-2);padding:10px;box-shadow:var(--shadow)}
+.stack{display:grid;gap:8px}
 .grow{flex:1 1 auto}
 input,select,textarea,button{font:inherit}
-input,select,textarea{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:#fff}
-button{padding:9px 12px;border:0;border-radius:999px;background:var(--acc);color:#fff;font-weight:700;cursor:pointer}
-button.alt{background:#dde5e8;color:var(--ink)}
+input,select,textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
+button{padding:8px 11px;border:1px solid transparent;border-radius:999px;background:var(--acc);color:#fff;font-weight:700;cursor:pointer}
+button.alt{background:var(--soft);border-color:var(--line);color:var(--ink)}
+.button-group{display:flex;gap:8px;flex-wrap:wrap}
+.button-group button{flex:1 1 0}
 .row{display:flex;gap:8px;flex-wrap:wrap}
 .row > *{flex:1 1 0}
 .sessions{display:grid;gap:8px}
-.session-btn{display:block;width:100%;text-align:left;padding:10px 11px;border:1px solid var(--line);border-radius:10px;background:#fff}
-.session-btn.active{border-color:var(--acc);background:#f7fbfd}
+.session-btn{display:block;width:100%;text-align:left;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--ink)}
+.session-btn.active{border-color:var(--acc);background:var(--acc-soft)}
 .chat{display:grid;gap:8px;max-height:52vh;overflow:auto;padding-right:4px}
-.msg{padding:10px 11px;border-radius:12px;border:1px solid var(--line);background:#fff}
-.msg.user{background:#f7fbfd;border-color:#d9ebf5}
-.msg.system{background:#fbfaf5}
+.msg{padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel-2)}
+.msg.user{background:var(--acc-soft);border-color:var(--line)}
+.msg.system{background:var(--panel)}
 .msg .meta{font-size:12px;color:var(--mut);margin-bottom:4px}
 .tree{display:grid;gap:2px;max-height:260px;overflow:auto}
 .node{font-size:13px;padding:2px 0}
 .node.dir{font-weight:700}
 .children{margin-left:14px}
-pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--soft);padding:10px;border-radius:10px;border:1px solid var(--line)}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--soft);padding:8px;border-radius:8px;border:1px solid var(--line);color:var(--ink)}
 .commands{display:grid;gap:8px;max-height:28vh;overflow:auto}
-.cmd{border:1px solid var(--line);border-radius:10px;padding:10px;background:#fff}
+.cmd{border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel-2)}
 .cmd .meta{font-size:12px;color:var(--mut);margin-bottom:6px}
-.terminal-wrap{border:1px solid var(--line);border-radius:12px;background:#fbfbf8;overflow:hidden}
-.terminal-meta{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border-bottom:1px solid var(--line);font-size:13px;color:var(--mut)}
+.terminal-wrap{border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+.terminal-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border-bottom:1px solid var(--line);font-size:12px;color:var(--mut)}
 .terminal-meta strong{color:var(--ink)}
-#terminal{height:320px;padding:8px}
+#terminal{height:320px;padding:4px}
+.terminal-card{display:grid;gap:8px}
+.terminal-card.grow{height:calc(100vh - 88px)}
+.terminal-wrap.grow{height:100%;display:flex;flex-direction:column}
+.terminal-wrap.grow #terminal{height:100%;min-height:420px}
 .pill{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px 8px;background:#fff;font-size:12px;color:var(--mut)}
 .pill.live{color:#225d42;border-color:#b6d8c5;background:#f4fbf7}
+.pill.starting,.pill.connected{color:#8a5a2b;border-color:#e3c9a8;background:#fcf6ef}
+.pill.stopped,.pill.disconnected,.pill.pending{color:var(--mut);background:var(--panel)}
+.pill.error{color:#8d2a2a;border-color:#e8c0c0;background:#fff6f6}
 .hint{font-size:13px;color:var(--mut)}
-@media (max-width:1100px){.app{grid-template-columns:1fr}.pane{border-right:0;border-bottom:1px solid var(--line)}}
+.toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.toolrow{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.toggle{display:inline-flex;gap:4px;padding:3px;background:var(--soft);border:1px solid var(--line);border-radius:999px}
+.toggle button{padding:6px 10px;background:transparent;color:var(--mut);font-weight:600}
+.toggle button.active{background:var(--panel-2);color:var(--ink);box-shadow:var(--shadow)}
+.mini-only{display:none}
+.mode-min .mini-only{display:block}
+.mode-min .full-only{display:none !important}
+.mode-min .pane-right{display:none}
+.mode-min #session-title{display:none}
+.mode-min #session-path{display:none}
+.mode-min .pane-center .head{display:none}
+.mode-min .pane-center .body{padding:8px}
+.mode-min .pane .body{padding:8px}
+.mode-min .terminal-card{height:calc(100vh - 16px)}
+.mode-min .terminal-wrap.grow #terminal{min-height:560px}
+.theme-toggle{min-width:112px}
+@media (max-width:1100px){.app,.mode-min .app{grid-template-columns:1fr}.pane{border-right:0;border-bottom:1px solid var(--line)}.mode-min .pane-right{display:none}.terminal-card.grow{height:auto}.terminal-wrap.grow #terminal,.mode-min .terminal-wrap.grow #terminal{min-height:420px}}
 </style>
 </head>
-<body>
+<body class="mode-min theme-light">
 <div class="app">
   <section class="pane">
-    <div class="head"><h1>Agent Proxy POC</h1><div class="mut">Local supervisor for chat, files, and commands.</div></div>
+    <div class="head">
+      <div class="toolbar">
+        <div>
+          <h1>Agent Proxy POC</h1>
+          <div class="mut">Local supervisor for chat, files, and commands.</div>
+        </div>
+        <div class="toggle">
+          <button id="mode-min-btn" class="active" onclick="setMode('min')">Minimized</button>
+          <button id="mode-detailed-btn" onclick="setMode('detailed')">Detailed</button>
+        </div>
+      </div>
+      <div class="toolrow">
+        <div class="mut">Terminal-first workspace</div>
+        <div class="toggle theme-toggle">
+          <button id="theme-light-btn" class="active" onclick="setTheme('light')">Light</button>
+          <button id="theme-dark-btn" onclick="setTheme('dark')">Dark</button>
+        </div>
+      </div>
+    </div>
     <div class="body stack">
       <div class="card stack">
         <h2>New Session</h2>
@@ -388,33 +503,38 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monospa
         <input id="title" placeholder="Session title">
         <input id="workspace" placeholder="Optional workspace path">
         <button onclick="createSession()">Create Session</button>
+        <div class="stack mini-only">
+          <h2>Current Session</h2>
+          <select id="session-select" onchange="selectSession(this.value)"></select>
+        </div>
       </div>
-      <div class="stack">
+      <div class="stack full-only">
         <h2>Sessions</h2>
         <div id="sessions" class="sessions"></div>
       </div>
     </div>
   </section>
-  <section class="pane">
+  <section class="pane pane-center">
     <div class="head"><h2 id="session-title">No session selected</h2><div class="mut" id="session-path"></div></div>
     <div class="body stack">
-      <div class="card stack">
+      <div class="card terminal-card grow">
         <h2>Live Terminal</h2>
-        <div class="row">
+        <div class="button-group">
           <button onclick="startTty('shell')">Open Shell</button>
           <button class="alt" onclick="startTty('claude')">Open Claude</button>
           <button class="alt" onclick="startTty('codex')">Open Codex</button>
+          <button class="alt" onclick="stopTty()">Stop</button>
         </div>
-        <div class="terminal-wrap">
+        <div class="terminal-wrap grow">
           <div class="terminal-meta">
             <div><strong id="tty-title">No terminal attached</strong></div>
             <div id="tty-status" class="pill">pending</div>
           </div>
           <div id="terminal"></div>
         </div>
-        <div class="hint">This POC streams a real PTY into the browser terminal over a direct WebSocket. Input and resize events are sent back to the running shell, Claude, or Codex session.</div>
+        <div class="hint">This POC streams a real PTY into the browser terminal over a direct WebSocket. Minimized mode keeps only session creation and terminal controls visible.</div>
       </div>
-      <div class="card stack">
+      <div class="card stack full-only">
         <h2>Chat</h2>
         <div id="chat" class="chat"></div>
         <textarea id="prompt" rows="4" placeholder="Send a prompt to the supervisor"></textarea>
@@ -423,14 +543,14 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monospa
           <button class="alt" onclick="refresh()">Refresh</button>
         </div>
       </div>
-      <div class="card stack">
+      <div class="card stack full-only">
         <h2>Command Runner</h2>
         <input id="command" placeholder="pwd">
         <button onclick="runCommand()">Run Command</button>
       </div>
     </div>
   </section>
-  <section class="pane">
+  <section class="pane pane-right">
     <div class="head"><h2>Files And Activity</h2><div class="mut">Browse workspace files and recent commands.</div></div>
     <div class="body stack">
       <div class="card stack">
@@ -458,6 +578,8 @@ let resizeObserver = null;
 let ttySocket = null;
 let ttySocketSession = "";
 let ttyResizeTimer = null;
+let uiMode = "min";
+let uiTheme = "light";
 function esc(s){return String(s ?? "");}
 async function api(path, options={}){
   const res = await fetch(path, options);
@@ -480,7 +602,7 @@ function ensureTerminal(){
     cursorBlink: true,
     fontSize: 13,
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
-    theme: { background: "#fbfbf8", foreground: "#243238" },
+    theme: { background: "#f5f5f1", foreground: "#213038" },
     scrollback: 3000,
     convertEol: true,
   });
@@ -516,10 +638,30 @@ function fitTerminal(force=false){
     ttySocket.send(JSON.stringify({type:"resize", cols: term.cols, rows: term.rows}));
   }
 }
+function setMode(mode){
+  uiMode = mode === "detailed" ? "detailed" : "min";
+  document.body.classList.toggle("mode-min", uiMode === "min");
+  document.getElementById("mode-min-btn").classList.toggle("active", uiMode === "min");
+  document.getElementById("mode-detailed-btn").classList.toggle("active", uiMode === "detailed");
+  setTimeout(() => fitTerminal(true), 30);
+}
+function setTheme(theme){
+  uiTheme = theme === "dark" ? "dark" : "light";
+  document.body.classList.toggle("theme-dark", uiTheme === "dark");
+  document.body.classList.toggle("theme-light", uiTheme === "light");
+  document.getElementById("theme-light-btn").classList.toggle("active", uiTheme === "light");
+  document.getElementById("theme-dark-btn").classList.toggle("active", uiTheme === "dark");
+  if(term){
+    term.options.theme = uiTheme === "dark"
+      ? { background: "#101516", foreground: "#dde7e9" }
+      : { background: "#f5f5f1", foreground: "#213038" };
+    setTimeout(() => fitTerminal(true), 10);
+  }
+}
 function setTtyStatus(label, live=false){
   const el = document.getElementById("tty-status");
   el.textContent = label;
-  el.className = live ? "pill live" : "pill";
+  el.className = `pill ${live ? "live" : ""} ${label}`.trim();
 }
 function setTtyTitle(label){
   document.getElementById("tty-title").textContent = label || "No terminal attached";
@@ -544,7 +686,8 @@ function handleTtyMessage(message){
   }
   if(message.type === "status"){
     setTtyTitle(message.title ? `Terminal: ${message.title}` : "No terminal attached");
-    setTtyStatus(message.alive ? "live" : "idle", !!message.alive);
+    const state = message.state || (message.alive ? "live" : "stopped");
+    setTtyStatus(state, !!message.alive);
     return;
   }
   if(message.type === "error"){
@@ -614,7 +757,7 @@ function renderSession(data){
   if(term) term.clear();
   if(data.tty){
     setTtyTitle(data.tty.title ? `Terminal: ${data.tty.title}` : "No terminal attached");
-    setTtyStatus(data.tty.active ? "live" : "pending", !!data.tty.active);
+    setTtyStatus(data.tty.state || (data.tty.active ? "live" : "pending"), !!data.tty.active);
   }else{
     setTtyTitle("No terminal attached");
     setTtyStatus("pending", false);
@@ -654,6 +797,21 @@ async function startTty(mode){
 }
 async function loadSessions(){
   const data = await api("/api/sessions");
+  const select = document.getElementById("session-select");
+  if(select){
+    select.innerHTML = "";
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = data.sessions.length ? "Select a session" : "No sessions yet";
+    select.appendChild(blank);
+    data.sessions.forEach(item => {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = `${item.title} (${item.tool})`;
+      option.selected = item.id === currentId;
+      select.appendChild(option);
+    });
+  }
   const wrap = document.getElementById("sessions");
   wrap.innerHTML = "";
   data.sessions.forEach(item => {
@@ -663,6 +821,9 @@ async function loadSessions(){
     btn.onclick = () => loadSession(item.id);
     wrap.appendChild(btn);
   });
+}
+function selectSession(id){
+  if(id) loadSession(id);
 }
 async function createSession(){
   const data = await api("/api/sessions", {
@@ -686,6 +847,14 @@ async function loadSession(id){
   await loadSessions();
   connectTtySocket();
   fitTerminal(true);
+}
+async function stopTty(){
+  if(!currentId) return;
+  await api(`/api/sessions/${currentId}/tty/stop`, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({})
+  });
 }
 async function sendPrompt(){
   if(!currentId) return;
@@ -723,6 +892,8 @@ async function refresh(){
   if(currentId) await loadSession(currentId);
   else await loadSessions();
 }
+setMode("min");
+setTheme("light");
 loadSessions();
 </script>
 </body>
@@ -900,8 +1071,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     mode = str(body.get("mode") or "shell")
                     with LOCK:
                         start_tty_session(session, mode)
-                        if session.get("tty"):
+                        if session.get("tty") and session["tty"].get("alive"):
                             tty_resize(session, 100, 30)
+                    self._json(200, tty_poll(session, 0))
+                    return
+                if tty_action == "stop":
+                    with LOCK:
+                        stop_tty_session(session)
                     self._json(200, tty_poll(session, 0))
                     return
                 if tty_action == "input":
@@ -944,11 +1120,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             session.setdefault("tty_clients", set()).add(peer)
             title = session.get("tty_title", "")
             alive = bool((session.get("tty") or {}).get("alive"))
+            state = session.get("tty_state", "pending")
             backlog = "".join(chunk.get("data", "") for chunk in session.get("tty_chunks", []))
             cursor = int(session.get("tty_seq", 0))
         debug_log(f"tty websocket connected for session={session_id}")
         try:
-            peer.send_json({"type": "status", "alive": alive, "title": title, "cursor": cursor})
+            peer.send_json({"type": "status", "alive": alive, "title": title, "cursor": cursor, "state": state})
             if backlog:
                 peer.send_json({"type": "output", "data": backlog, "cursor": cursor})
             while peer.alive:
