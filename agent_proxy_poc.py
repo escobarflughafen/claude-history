@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
+import hashlib
 import http.server
 import json
 import os
@@ -29,6 +31,7 @@ from export_utils import start_cloudflare_tunnel
 POC_ROOT = Path(tempfile.gettempdir()) / "agent-proxy-poc"
 SESSIONS: dict[str, dict[str, Any]] = {}
 LOCK = threading.Lock()
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 def now_iso() -> str:
@@ -85,6 +88,32 @@ def _append_tty_output(session: dict[str, Any], data: str) -> None:
     session["tty_seq"] = int(session.get("tty_seq", 0)) + 1
     session.setdefault("tty_chunks", []).append({"seq": session["tty_seq"], "data": data})
     session["tty_chunks"] = session["tty_chunks"][-2000:]
+    broadcast_tty_message(session, {"type": "output", "data": data, "cursor": session["tty_seq"]})
+
+
+def broadcast_tty_message(session: dict[str, Any], payload: dict[str, Any]) -> None:
+    stale: list[WebSocketPeer] = []
+    for peer in list(session.get("tty_clients", [])):
+        try:
+            peer.send_json(payload)
+        except Exception as exc:
+            debug_log(f"tty websocket send failed for session={session['id']}: {exc}")
+            stale.append(peer)
+    for peer in stale:
+        session.get("tty_clients", set()).discard(peer)
+
+
+def broadcast_tty_status(session: dict[str, Any]) -> None:
+    tty = session.get("tty") or {}
+    broadcast_tty_message(
+        session,
+        {
+            "type": "status",
+            "alive": bool(tty.get("alive")),
+            "title": session.get("tty_title", ""),
+            "cursor": int(session.get("tty_seq", 0)),
+        },
+    )
 
 
 def _tty_reader(session_id: str) -> None:
@@ -121,6 +150,7 @@ def _tty_reader(session_id: str) -> None:
                 if session and session.get("tty"):
                     session["tty"]["alive"] = False
                     _append_tty_output(session, "\r\n[session ended]\r\n")
+                    broadcast_tty_status(session)
             debug_log(f"tty eof for session={session_id} pid={pid} status={exit_status or 'unknown'}")
             return
         text = data.decode("utf-8", errors="replace")
@@ -162,6 +192,7 @@ def start_tty_session(session: dict[str, Any], mode: str) -> None:
     thread = threading.Thread(target=_tty_reader, args=(session["id"],), daemon=True)
     session["tty_thread"] = thread
     thread.start()
+    broadcast_tty_status(session)
     debug_log(f"tty started for session={session['id']} pid={pid} mode={mode}")
 
 
@@ -174,6 +205,7 @@ def tty_resize(session: dict[str, Any], cols: int, rows: int) -> None:
         fcntl.ioctl(tty["master_fd"], termios.TIOCSWINSZ, payload)
     except OSError:
         return
+    broadcast_tty_message(session, {"type": "resize", "cols": max(cols, 1), "rows": max(rows, 1)})
     debug_log(f"tty resized for session={session['id']} cols={max(cols, 1)} rows={max(rows, 1)}")
 
 
@@ -198,6 +230,66 @@ def tty_poll(session: dict[str, Any], cursor: int) -> dict[str, Any]:
         "alive": bool(tty.get("alive")),
         "title": session.get("tty_title", ""),
     }
+
+
+class WebSocketPeer:
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+        self.send_lock = threading.Lock()
+        self.alive = True
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    def send_json(self, payload: dict[str, Any]) -> None:
+        self.send_text(json.dumps(payload, ensure_ascii=False))
+
+    def send_text(self, text: str) -> None:
+        if not self.alive:
+            raise ConnectionError("websocket closed")
+        data = text.encode("utf-8")
+        header = bytearray([0x81])
+        length = len(data)
+        if length < 126:
+            header.append(length)
+        elif length < 65536:
+            header.append(126)
+            header.extend(length.to_bytes(2, "big"))
+        else:
+            header.append(127)
+            header.extend(length.to_bytes(8, "big"))
+        with self.send_lock:
+            self.connection.sendall(header + data)
+
+    def close(self) -> None:
+        if not self.alive:
+            return
+        self.alive = False
+        try:
+            self.connection.sendall(b"\x88\x00")
+        except OSError:
+            pass
+
+
+def read_ws_frame(rfile: Any) -> tuple[int, bytes]:
+    first = rfile.read(2)
+    if len(first) < 2:
+        raise EOFError("websocket closed")
+    opcode = first[0] & 0x0F
+    masked = bool(first[1] & 0x80)
+    length = first[1] & 0x7F
+    if length == 126:
+        length = int.from_bytes(rfile.read(2), "big")
+    elif length == 127:
+        length = int.from_bytes(rfile.read(8), "big")
+    mask = rfile.read(4) if masked else b""
+    payload = rfile.read(length)
+    if masked and mask:
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
 
 
 def create_session(tool: str, title: str, workspace_dir: str = "") -> dict[str, Any]:
@@ -320,7 +412,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monospa
           </div>
           <div id="terminal"></div>
         </div>
-        <div class="hint">This POC streams a real PTY into the browser terminal with polling transport. Input is sent back to the running shell, Claude, or Codex session.</div>
+        <div class="hint">This POC streams a real PTY into the browser terminal over a direct WebSocket. Input and resize events are sent back to the running shell, Claude, or Codex session.</div>
       </div>
       <div class="card stack">
         <h2>Chat</h2>
@@ -359,12 +451,13 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font:13px/1.4 ui-monospa
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
 let currentId = "";
-let ttyCursor = 0;
-let ttyPoller = null;
 let term = null;
 let termLoadFailed = false;
 let fitAddon = null;
 let resizeObserver = null;
+let ttySocket = null;
+let ttySocketSession = "";
+let ttyResizeTimer = null;
 function esc(s){return String(s ?? "");}
 async function api(path, options={}){
   const res = await fetch(path, options);
@@ -397,21 +490,18 @@ function ensureTerminal(){
   fitTerminal(true);
   term.writeln("Select a session, then open Shell, Claude, or Codex.");
   term.onData((data) => {
-    if(!currentId) return;
-    fetch(`/api/sessions/${currentId}/tty/input`, {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({data}),
-    }).catch(() => {});
+    if(!ttySocket || ttySocket.readyState !== WebSocket.OPEN) return;
+    ttySocket.send(JSON.stringify({type:"input", data}));
   });
   term.onResize(({cols, rows}) => {
     if(cols < 2 || rows < 2) return;
-    if(!currentId) return;
-    fetch(`/api/sessions/${currentId}/tty/resize`, {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({cols, rows}),
-    }).catch(() => {});
+    if(!ttySocket || ttySocket.readyState !== WebSocket.OPEN) return;
+    if(ttyResizeTimer) clearTimeout(ttyResizeTimer);
+    ttyResizeTimer = setTimeout(() => {
+      if(ttySocket && ttySocket.readyState === WebSocket.OPEN){
+        ttySocket.send(JSON.stringify({type:"resize", cols, rows}));
+      }
+    }, 30);
   });
   if(!resizeObserver){
     resizeObserver = new ResizeObserver(() => fitTerminal());
@@ -422,12 +512,8 @@ function ensureTerminal(){
 function fitTerminal(force=false){
   if(!term || !fitAddon) return;
   fitAddon.fit();
-  if(force && currentId && term.cols > 1 && term.rows > 1){
-    fetch(`/api/sessions/${currentId}/tty/resize`, {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({cols: term.cols, rows: term.rows}),
-    }).catch(() => {});
+  if(force && ttySocket && ttySocket.readyState === WebSocket.OPEN && term.cols > 1 && term.rows > 1){
+    ttySocket.send(JSON.stringify({type:"resize", cols: term.cols, rows: term.rows}));
   }
 }
 function setTtyStatus(label, live=false){
@@ -438,22 +524,67 @@ function setTtyStatus(label, live=false){
 function setTtyTitle(label){
   document.getElementById("tty-title").textContent = label || "No terminal attached";
 }
-async function pollTty(){
-  if(!currentId) return;
-  try{
-    const data = await api(`/api/sessions/${currentId}/tty/poll?cursor=${ttyCursor}`);
-    ttyCursor = data.cursor || ttyCursor;
-    ensureTerminal();
-    (data.chunks || []).forEach(chunk => term.write(chunk.data || ""));
-    setTtyTitle(data.title ? `Terminal: ${data.title}` : "No terminal attached");
-    setTtyStatus(data.alive ? "live" : "idle", !!data.alive);
-  }catch(err){
+function disconnectTtySocket(){
+  if(ttySocket){
+    ttySocket.onopen = null;
+    ttySocket.onmessage = null;
+    ttySocket.onclose = null;
+    ttySocket.onerror = null;
+    try{ ttySocket.close(); }catch(err){}
+  }
+  ttySocket = null;
+  ttySocketSession = "";
+}
+function handleTtyMessage(message){
+  ensureTerminal();
+  if(!term) return;
+  if(message.type === "output"){
+    term.write(message.data || "");
+    return;
+  }
+  if(message.type === "status"){
+    setTtyTitle(message.title ? `Terminal: ${message.title}` : "No terminal attached");
+    setTtyStatus(message.alive ? "live" : "idle", !!message.alive);
+    return;
+  }
+  if(message.type === "error"){
     setTtyStatus("error", false);
+    if(message.message){
+      term.writeln(`\r\n[${message.message}]`);
+    }
   }
 }
-function startTtyPolling(){
-  if(ttyPoller) clearInterval(ttyPoller);
-  ttyPoller = setInterval(pollTty, 250);
+function connectTtySocket(){
+  if(!currentId) return;
+  if(ttySocket && ttySocketSession === currentId &&
+    (ttySocket.readyState === WebSocket.OPEN || ttySocket.readyState === WebSocket.CONNECTING)){
+    return;
+  }
+  disconnectTtySocket();
+  ensureTerminal();
+  if(!term) return;
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  ttySocketSession = currentId;
+  ttySocket = new WebSocket(`${protocol}://${window.location.host}/api/sessions/${currentId}/tty/ws`);
+  ttySocket.onopen = () => {
+    setTtyStatus("connected", false);
+    fitTerminal(true);
+  };
+  ttySocket.onmessage = (event) => {
+    try{
+      handleTtyMessage(JSON.parse(event.data));
+    }catch(err){
+      console.error("Invalid tty message", err);
+    }
+  };
+  ttySocket.onclose = () => {
+    if(currentId === ttySocketSession){
+      setTtyStatus("disconnected", false);
+    }
+  };
+  ttySocket.onerror = () => {
+    setTtyStatus("error", false);
+  };
 }
 function renderTree(nodes){
   const wrap = document.getElementById("tree");
@@ -479,12 +610,12 @@ function renderSession(data){
   currentId = data.id;
   document.getElementById("session-title").textContent = data.title;
   document.getElementById("session-path").textContent = data.workspace_dir;
+  ensureTerminal();
+  if(term) term.clear();
   if(data.tty){
-    ttyCursor = data.tty.cursor || 0;
     setTtyTitle(data.tty.title ? `Terminal: ${data.tty.title}` : "No terminal attached");
     setTtyStatus(data.tty.active ? "live" : "pending", !!data.tty.active);
   }else{
-    ttyCursor = 0;
     setTtyTitle("No terminal attached");
     setTtyStatus("pending", false);
   }
@@ -511,8 +642,8 @@ async function startTty(mode){
   ensureTerminal();
   if(!term) return;
   term.clear();
+  connectTtySocket();
   fitTerminal(true);
-  ttyCursor = 0;
   setTtyTitle(`Terminal: ${mode}`);
   setTtyStatus("starting", false);
   await api(`/api/sessions/${currentId}/tty/start`, {
@@ -520,7 +651,6 @@ async function startTty(mode){
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({mode})
   });
-  await pollTty();
 }
 async function loadSessions(){
   const data = await api("/api/sessions");
@@ -548,12 +678,14 @@ async function createSession(){
   await loadSession(data.id);
 }
 async function loadSession(id){
+  if(currentId && currentId !== id){
+    disconnectTtySocket();
+  }
   const data = await api(`/api/sessions/${id}`);
   renderSession(data);
   await loadSessions();
+  connectTtySocket();
   fitTerminal(true);
-  startTtyPolling();
-  await pollTty();
 }
 async function sendPrompt(){
   if(!currentId) return;
@@ -591,7 +723,6 @@ async function refresh(){
   if(currentId) await loadSession(currentId);
   else await loadSessions();
 }
-startTtyPolling();
 loadSessions();
 </script>
 </body>
@@ -622,6 +753,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(204)
             self.end_headers()
             return
+        if parsed.path.startswith("/api/sessions/") and parsed.path.endswith("/tty/ws"):
+            parts = parsed.path.split("/")
+            if len(parts) == 6:
+                self._handle_tty_websocket(parts[3])
+                return
         if parsed.path == "/":
             self._html(HTML)
             return
@@ -786,6 +922,78 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self._json(200, {"ok": True})
                     return
         self._json(404, {"error": "not found"})
+
+    def _handle_tty_websocket(self, session_id: str) -> None:
+        session = self._get_session(session_id)
+        if not session:
+            return
+        ws_key = self.headers.get("Sec-WebSocket-Key")
+        if not ws_key:
+            self._json(400, {"error": "Missing WebSocket key"})
+            return
+        accept = base64.b64encode(hashlib.sha1(f"{ws_key}{WS_GUID}".encode("utf-8")).digest()).decode("ascii")
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
+        self.end_headers()
+        self.close_connection = True
+
+        peer = WebSocketPeer(self.connection)
+        with LOCK:
+            session.setdefault("tty_clients", set()).add(peer)
+            title = session.get("tty_title", "")
+            alive = bool((session.get("tty") or {}).get("alive"))
+            backlog = "".join(chunk.get("data", "") for chunk in session.get("tty_chunks", []))
+            cursor = int(session.get("tty_seq", 0))
+        debug_log(f"tty websocket connected for session={session_id}")
+        try:
+            peer.send_json({"type": "status", "alive": alive, "title": title, "cursor": cursor})
+            if backlog:
+                peer.send_json({"type": "output", "data": backlog, "cursor": cursor})
+            while peer.alive:
+                opcode, payload = read_ws_frame(self.rfile)
+                if opcode == 0x8:
+                    debug_log(f"tty websocket close frame for session={session_id}")
+                    break
+                if opcode == 0x9:
+                    with peer.send_lock:
+                        self.connection.sendall(b"\x8a\x00")
+                    continue
+                if opcode != 0x1:
+                    continue
+                try:
+                    message = json.loads(payload.decode("utf-8"))
+                except Exception:
+                    peer.send_json({"type": "error", "message": "invalid tty message"})
+                    continue
+                with LOCK:
+                    live_session = SESSIONS.get(session_id)
+                    if not live_session:
+                        peer.send_json({"type": "error", "message": "session disappeared"})
+                        break
+                    if message.get("type") == "input":
+                        tty_write(live_session, str(message.get("data") or ""))
+                    elif message.get("type") == "resize":
+                        try:
+                            cols = int(message.get("cols") or 0)
+                            rows = int(message.get("rows") or 0)
+                        except (TypeError, ValueError):
+                            cols = 0
+                            rows = 0
+                        if cols > 0 and rows > 0:
+                            tty_resize(live_session, cols, rows)
+        except EOFError:
+            debug_log(f"tty websocket eof for session={session_id}")
+        except Exception as exc:
+            debug_log(f"tty websocket error for session={session_id}: {exc}")
+        finally:
+            with LOCK:
+                live_session = SESSIONS.get(session_id)
+                if live_session:
+                    live_session.setdefault("tty_clients", set()).discard(peer)
+            peer.close()
+            debug_log(f"tty websocket disconnected for session={session_id}")
 
     def _read_json(self) -> dict[str, Any] | None:
         try:
