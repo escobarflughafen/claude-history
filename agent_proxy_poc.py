@@ -400,27 +400,27 @@ body.theme-dark{
 }
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.35 "Helvetica Neue",Helvetica,"Segoe UI",Arial,sans-serif;background:var(--bg);color:var(--ink)}
-.app{display:grid;grid-template-columns:280px minmax(0,1fr) 400px;min-height:100vh}
-.mode-min .app{grid-template-columns:320px minmax(0,1fr)}
+.app{display:grid;grid-template-columns:260px minmax(0,1fr) 360px;min-height:100vh}
+.mode-min .app{grid-template-columns:240px minmax(0,1fr)}
 .pane{border-right:1px solid var(--line);background:var(--panel)}
 .pane:last-child{border-right:0}
-.head{padding:10px 12px;border-bottom:1px solid var(--line);background:var(--panel)}
-.body{padding:10px 12px}
+.head{padding:8px 10px;border-bottom:1px solid var(--line);background:var(--panel)}
+.body{padding:8px 10px}
 h1,h2,h3{margin:0;color:var(--ink)}
 h1{font-size:18px}
 h2{font-size:14px}
 .mut{color:var(--mut)}
-.card{border:1px solid var(--line);border-radius:10px;background:var(--panel-2);padding:10px;box-shadow:var(--shadow)}
+.card{border:1px solid var(--line);border-radius:10px;background:var(--panel-2);padding:8px;box-shadow:var(--shadow)}
 .stack{display:grid;gap:8px}
 .grow{flex:1 1 auto}
 input,select,textarea,button{font:inherit}
 input,select,textarea{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink)}
 button{padding:8px 11px;border:1px solid transparent;border-radius:999px;background:var(--acc);color:#fff;font-weight:700;cursor:pointer}
 button.alt{background:var(--soft);border-color:var(--line);color:var(--ink)}
-.button-group{display:flex;gap:8px;flex-wrap:wrap}
-.button-group button{flex:1 1 0}
 .row{display:flex;gap:8px;flex-wrap:wrap}
 .row > *{flex:1 1 0}
+.control-strip{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(110px,0.9fr) minmax(110px,0.9fr) minmax(100px,0.9fr) auto auto;gap:6px;align-items:center}
+.control-strip select,.control-strip button{min-width:0}
 .sessions{display:grid;gap:8px}
 .session-btn{display:block;width:100%;text-align:left;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel-2);color:var(--ink)}
 .session-btn.active{border-color:var(--acc);background:var(--acc-soft)}
@@ -438,24 +438,20 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospa
 .cmd{border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--panel-2)}
 .cmd .meta{font-size:12px;color:var(--mut);margin-bottom:6px}
 .terminal-wrap{border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
-.terminal-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 9px;border-bottom:1px solid var(--line);font-size:12px;color:var(--mut)}
+.terminal-meta{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border-bottom:1px solid var(--line);font-size:12px;color:var(--mut)}
 .terminal-meta strong{color:var(--ink)}
-#terminal{height:320px;padding:4px}
+#terminal{height:320px;padding:2px}
 .terminal-card{display:grid;gap:8px}
-.terminal-card.grow{height:calc(100vh - 88px)}
+.terminal-card.grow{height:calc(100vh - 32px)}
 .terminal-wrap.grow{height:100%;display:flex;flex-direction:column}
-.terminal-wrap.grow #terminal{height:100%;min-height:420px}
+.terminal-wrap.grow #terminal{height:100%;min-height:520px}
 .pill{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:3px 8px;background:#fff;font-size:12px;color:var(--mut)}
 .pill.live{color:#225d42;border-color:#b6d8c5;background:#f4fbf7}
 .pill.starting,.pill.connected{color:#8a5a2b;border-color:#e3c9a8;background:#fcf6ef}
 .pill.stopped,.pill.disconnected,.pill.pending{color:var(--mut);background:var(--panel)}
 .pill.error{color:#8d2a2a;border-color:#e8c0c0;background:#fff6f6}
-.hint{font-size:13px;color:var(--mut)}
+.hint{font-size:12px;color:var(--mut)}
 .toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.toolrow{display:flex;gap:8px;align-items:center;justify-content:space-between}
-.toggle{display:inline-flex;gap:4px;padding:3px;background:var(--soft);border:1px solid var(--line);border-radius:999px}
-.toggle button{padding:6px 10px;background:transparent;color:var(--mut);font-weight:600}
-.toggle button.active{background:var(--panel-2);color:var(--ink);box-shadow:var(--shadow)}
 .mini-only{display:none}
 .mode-min .mini-only{display:block}
 .mode-min .full-only{display:none !important}
@@ -463,12 +459,18 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospa
 .mode-min #session-title{display:none}
 .mode-min #session-path{display:none}
 .mode-min .pane-center .head{display:none}
-.mode-min .pane-center .body{padding:8px}
-.mode-min .pane .body{padding:8px}
-.mode-min .terminal-card{height:calc(100vh - 16px)}
-.mode-min .terminal-wrap.grow #terminal{min-height:560px}
-.theme-toggle{min-width:112px}
-@media (max-width:1100px){.app,.mode-min .app{grid-template-columns:1fr}.pane{border-right:0;border-bottom:1px solid var(--line)}.mode-min .pane-right{display:none}.terminal-card.grow{height:auto}.terminal-wrap.grow #terminal,.mode-min .terminal-wrap.grow #terminal{min-height:420px}}
+.mode-min .pane-center .body{padding:6px}
+.mode-min .pane .body{padding:6px}
+.mode-min .terminal-card{height:calc(100vh - 12px)}
+.mode-min .terminal-wrap.grow #terminal{min-height:620px}
+@media (max-width:1100px){
+  .app,.mode-min .app{grid-template-columns:1fr}
+  .pane{border-right:0;border-bottom:1px solid var(--line)}
+  .mode-min .pane-right{display:none}
+  .terminal-card.grow{height:auto}
+  .terminal-wrap.grow #terminal,.mode-min .terminal-wrap.grow #terminal{min-height:420px}
+  .control-strip{grid-template-columns:1fr 1fr 1fr;grid-auto-rows:minmax(36px,auto)}
+}
 </style>
 </head>
 <body class="mode-min theme-light">
@@ -478,18 +480,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospa
       <div class="toolbar">
         <div>
           <h1>Agent Proxy POC</h1>
-          <div class="mut">Local supervisor for chat, files, and commands.</div>
-        </div>
-        <div class="toggle">
-          <button id="mode-min-btn" class="active" onclick="setMode('min')">Minimized</button>
-          <button id="mode-detailed-btn" onclick="setMode('detailed')">Detailed</button>
-        </div>
-      </div>
-      <div class="toolrow">
-        <div class="mut">Terminal-first workspace</div>
-        <div class="toggle theme-toggle">
-          <button id="theme-light-btn" class="active" onclick="setTheme('light')">Light</button>
-          <button id="theme-dark-btn" onclick="setTheme('dark')">Dark</button>
+          <div class="mut">Terminal-first workspace</div>
         </div>
       </div>
     </div>
@@ -518,11 +509,24 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospa
     <div class="head"><h2 id="session-title">No session selected</h2><div class="mut" id="session-path"></div></div>
     <div class="body stack">
       <div class="card terminal-card grow">
-        <h2>Live Terminal</h2>
-        <div class="button-group">
-          <button onclick="startTty('shell')">Open Shell</button>
-          <button class="alt" onclick="startTty('claude')">Open Claude</button>
-          <button class="alt" onclick="startTty('codex')">Open Codex</button>
+        <div class="control-strip">
+          <select id="quick-session" onchange="selectSession(this.value)">
+            <option value="">Select session</option>
+          </select>
+          <select id="launch-mode">
+            <option value="shell">Shell</option>
+            <option value="claude">Claude</option>
+            <option value="codex">Codex</option>
+          </select>
+          <select id="view-mode" onchange="setMode(this.value)">
+            <option value="min">Minimized</option>
+            <option value="detailed">Detailed</option>
+          </select>
+          <select id="theme-mode" onchange="setTheme(this.value)">
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+          <button onclick="startSelectedTty()">Open</button>
           <button class="alt" onclick="stopTty()">Stop</button>
         </div>
         <div class="terminal-wrap grow">
@@ -532,7 +536,7 @@ pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.4 ui-monospa
           </div>
           <div id="terminal"></div>
         </div>
-        <div class="hint">This POC streams a real PTY into the browser terminal over a direct WebSocket. Minimized mode keeps only session creation and terminal controls visible.</div>
+        <div class="hint full-only">WebSocket terminal stream with compact session, launch, view, and theme controls.</div>
       </div>
       <div class="card stack full-only">
         <h2>Chat</h2>
@@ -641,16 +645,16 @@ function fitTerminal(force=false){
 function setMode(mode){
   uiMode = mode === "detailed" ? "detailed" : "min";
   document.body.classList.toggle("mode-min", uiMode === "min");
-  document.getElementById("mode-min-btn").classList.toggle("active", uiMode === "min");
-  document.getElementById("mode-detailed-btn").classList.toggle("active", uiMode === "detailed");
+  const view = document.getElementById("view-mode");
+  if(view) view.value = uiMode === "detailed" ? "detailed" : "min";
   setTimeout(() => fitTerminal(true), 30);
 }
 function setTheme(theme){
   uiTheme = theme === "dark" ? "dark" : "light";
   document.body.classList.toggle("theme-dark", uiTheme === "dark");
   document.body.classList.toggle("theme-light", uiTheme === "light");
-  document.getElementById("theme-light-btn").classList.toggle("active", uiTheme === "light");
-  document.getElementById("theme-dark-btn").classList.toggle("active", uiTheme === "dark");
+  const picker = document.getElementById("theme-mode");
+  if(picker) picker.value = uiTheme;
   if(term){
     term.options.theme = uiTheme === "dark"
       ? { background: "#101516", foreground: "#dde7e9" }
@@ -795,6 +799,10 @@ async function startTty(mode){
     body:JSON.stringify({mode})
   });
 }
+function startSelectedTty(){
+  const picker = document.getElementById("launch-mode");
+  startTty((picker && picker.value) || "shell");
+}
 async function loadSessions(){
   const data = await api("/api/sessions");
   const select = document.getElementById("session-select");
@@ -810,6 +818,21 @@ async function loadSessions(){
       option.textContent = `${item.title} (${item.tool})`;
       option.selected = item.id === currentId;
       select.appendChild(option);
+    });
+  }
+  const quick = document.getElementById("quick-session");
+  if(quick){
+    quick.innerHTML = "";
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = data.sessions.length ? "Select session" : "No sessions yet";
+    quick.appendChild(blank);
+    data.sessions.forEach(item => {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = item.title;
+      option.selected = item.id === currentId;
+      quick.appendChild(option);
     });
   }
   const wrap = document.getElementById("sessions");
